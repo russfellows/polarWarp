@@ -3,12 +3,12 @@ A Polars dataFrame implementation of parsing MinIO Warp object testing output lo
 
   Running this requires the correct python libraries and environment.  I use the "uv" package manager and virtual environment.  
 
-##Setup
+## Setup
 Install "uv", "pixi", or another package manager, such as pip.
-Example:
+Example
   user@host:# uv add polars pandas pyarrow zstd
 
-##Running
+## Running
   user@host:# uv run ./polars-parse-warp16.py                                                                                                                        
   Usage: python ./polars-parse-warp16.py [--help] : Prints this message and exits
 

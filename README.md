@@ -3,6 +3,10 @@ A Polars dataFrame implementation of parsing MinIO Warp object testing output lo
 
   Running this requires the correct python libraries and environment.  I use the "uv" package manager and virtual environment.  
 
+  Note: This program `polarWarp` runs about 37x faster than the builtin MinIO tools `warp merge` + `warp analyze`.  See specific results below.  Notice that polarWarp processes 10 files with a total line count of approximately 55M lines in 40.7 seconds.  To do the same using warp, you first have to merge the 10 files, which takes 5 minutes, and then "analyze" the results, which takes another 20m16s.  
+
+  Note2: All timing and results were performed on a Mac Studio, M1 Ultra with 32 GB RAM and a 1 TB SSD.  
+
     | Program      | Language + Lib  | Total Lines: Code | Time (real) | Max Res Set Size | Page Reclaims | Page Faults |  | Tot.  File Size | Total Lines  | x Faster | x Less Mem |
     |--------------|-----------------|-------------------|-------------|------------------|---------------|-------------|--|-----------------|--------------|----------|------------|
     | polarWarp    | python + polars | 255 : 161         | 00:40.7     | 18 GB            |  5,379,425    |  135,342    |  | 2.5 GB          |  54,998,687  | 37.25    | 1.13       |

@@ -1,5 +1,6 @@
 # polarWarp
-A Polars dataFrame implementation of parsing MinIO Warp object testing output logs
+A Polars dataFrame implementation of parsing MinIO Warp object testing output logs.  
+Why?  Because it's 37x faster, and produces better output results.  Warp's builtin tools are... painful at best.
 
   Running this requires the correct python libraries and environment.  I use the "uv" package manager and virtual environment.  
 

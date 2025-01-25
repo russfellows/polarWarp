@@ -5,6 +5,9 @@ A Polars dataFrame implementation of parsing MinIO Warp object testing output lo
 
 ## Setup
 Install `uv`,`pixi`, or another package manager, such as `pip`.
+
+For more on `uv` look here: https://docs.astral.sh/uv/
+
 ### Example
     user@host:# uv add polars pandas pyarrow zstd
 

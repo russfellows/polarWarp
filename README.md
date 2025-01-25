@@ -17,7 +17,7 @@ For more on `uv` look here: https://docs.astral.sh/uv/
     Usage: python ./polars-parse-warp16.py [--skip=<time_to_skip>] <file1> <file2> ...
 
 ## Output
-    russfellows@Russ-MacStudio polars-warp % uv run ./polars-parse-warp16.py --skip=300s ~/Public/warp-data/4kb/client-4[1-2]/intel-10RGW_100T_4kib_80R15W5D_vdb-master_trial_1.csv.zst
+    user@host:# uv run ./polars-parse-warp16.py --skip=300s ~/Public/warp-data/4kb/client-4[1-2]/intel-10RGW_100T_4kib_80R15W5D_vdb-master_trial_1.csv.zst
     Using skip value of 0:05:00
 
     Processing file: /Users/russfellows/Public/warp-data/4kb/client-41/intel-10RGW_100T_4kib_80R15W5D_vdb-master_trial_1.csv.zst

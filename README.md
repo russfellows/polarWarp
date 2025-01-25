@@ -10,9 +10,9 @@ Why?  Because it's 37x faster, and produces better output results.  Warp's built
 
     | Program      | Language + Lib  | Total Lines: Code | Time (real) | Max Res Set Size | Page Reclaims | Page Faults |  | Tot.  File Size | Total Lines  | x Faster | x Less Mem |
     |--------------|-----------------|-------------------|-------------|------------------|---------------|-------------|--|-----------------|--------------|----------|------------|
-    | polarWarp    | python + polars | 255 : 161         | 00:40.7     | 18 GB            |  5,379,425    |  135,342    |  | 2.5 GB          |  54,998,687  | 37.25    | 1.13       |
-    | warp merge   | Golang          | 122 : 93          | 04:59.9     | 15 GB            |  19,802,572   |  695        |  | 2.5 GB          |  54,998,687  | -        | -          |
-    | warp analyze | Golang          | 657 : 579         | 20:16.2     | 20 GB            |  139,747,943  |  237        |  | 2.5 GB          |  54,998,687  | -        | -          |
+    | polarWarp    | python + polars | 255 : 161         | 00:40.7     | 18 GB            |    5,379,425  |  135,342    |  | 2.5 GB          |  54,998,687  | 37.25    | 1.13       |
+    | warp merge   | Golang          | 122 :  93         | 04:59.9     | 15 GB            |   19,802,572  |      695    |  | 2.5 GB          |  54,998,687  | -        | -          |
+    | warp analyze | Golang          | 657 : 579         | 20:16.2     | 20 GB            |  139,747,943  |      237    |  | 2.5 GB          |  54,998,687  | -        | -          |
 
 ## Setup
 Install `uv`,`pixi`, or another package manager, such as `pip`.

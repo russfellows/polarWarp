@@ -26,9 +26,9 @@ For more on `uv` look here: https://docs.astral.sh/uv/
     user@host:# uv add polars pandas pyarrow zstd
 
 ## Running
-    user@host:# uv run ./polars-parse-warp16.py                                                                                                                        
-    Usage: python ./polars-parse-warp16.py [--help] : Prints this message and exits
-    Usage: python ./polars-parse-warp16.py [--skip=<time_to_skip>] <file1> <file2> ...
+    user@host:# uv run ./polarWarp.py                                                                                                                        
+    Usage: python ./polarWarp.py [--help] : Prints this message and exits
+    Usage: python ./polarWarp.py [--skip=<time_to_skip>] <file1> <file2> ...
 
 ## Output
     user@host:# uv run ./polarWarp.py --skip=2m ./warp-mixed-2025-01-26_023730_5S0?.csv.zst 

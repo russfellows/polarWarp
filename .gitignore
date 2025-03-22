@@ -27,3 +27,42 @@ env/
 .env
 .venv
 .python-version
+
+# Rust specific ignores
+/target/
+**/target/
+target/
+target/**/*
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# More detailed Cargo ignores
+**/.fingerprint/
+**/.cargo-lock
+.cargo/registry/
+.cargo/git/
+.cargo/bin/
+cargo-timing*.html
+.rustc_info.json
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+
+# Profiling files
+*.flamegraph
+perf.data
+perf.data.old
+
+# Data files
+*.zst
+*.csv

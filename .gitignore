@@ -27,3 +27,26 @@ env/
 .env
 .venv
 .python-version
+
+# Rust specific ignores
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+
+# Profiling files
+*.flamegraph
+perf.data
+perf.data.old

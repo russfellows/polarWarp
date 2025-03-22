@@ -1,0 +1,2 @@
+#!/bin/bash
+wget https://signal65-public.s3.us-west-2.amazonaws.com/warp-mixed-2025-01-26_023730_5S0w.csv.zst

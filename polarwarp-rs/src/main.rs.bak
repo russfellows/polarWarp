@@ -1,14 +1,10 @@
-// Not needed with updated inline uncompress in Polars 0.46
-//use std::fs::File;
-//use std::io::{BufReader, Read};
-
+use std::fs::File;
+use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
 use std::time::Instant;
 
 use clap::{Parser, ArgAction};
-
-// Import the Polars CSV APIs
-use polars::prelude::{CsvParseOptions, CsvReadOptions, DataFrame, DataType, SerReader};
+use polars::prelude::*;
 
 /// CLI arguments
 #[derive(Parser)]
@@ -40,12 +36,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Process each file
     for file_path in &args.files {
         println!("Processing file: {}", file_path);
-
+        
         let start = Instant::now();
-
+        
         // Read and display file info
         process_file(file_path, args.basic_stats)?;
-
+        
         let elapsed = start.elapsed();
         println!("Processed file in {:.2?}", elapsed);
     }
@@ -57,80 +53,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn process_file(file_path: &str, basic_stats_only: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Read the file
     let df = read_csv_file(file_path)?;
-
+    
     // Print basic statistics
     print_basic_stats(&df);
-
+    
     // If only basic stats were requested, we're done
     if basic_stats_only {
         return Ok(());
     }
-
+    
     // TODO: Add more complete processing in the future
     println!("Note: Full processing functionality not yet implemented");
-
+    
     Ok(())
 }
 
 /// Print basic stats about the dataframe
 fn print_basic_stats(df: &DataFrame) {
     println!("Shape: {} rows × {} columns", df.height(), df.width());
-
+    
     // Print column names and types
     println!("\nColumns:");
-    for name in df.get_column_names() {
-        let dtype = df.column(name).map(|s| s.dtype()).unwrap_or(&DataType::Null);
-        println!("  - {}: {}", name, dtype);
-    }
-
+    df.get_column_names().iter().for_each(|name| {
+        println!("  - {}: {}", name, df.column(name).unwrap().dtype());
+    });
+    
     // Print first few rows
     println!("\nSample data (first 5 rows):");
     let sample = df.head(Some(5));
     println!("{}", sample);
 }
 
-/// Read a CSV file and return a DataFrame (only .zst path implemented)
+/// Read a CSV file and return a DataFrame
 fn read_csv_file(file_path: &str) -> Result<DataFrame, Box<dyn std::error::Error>> {
-/*
- * Not needed since the reader now supports zstd or uncompressed csv
-    if !file_path.ends_with(".zst") {
-        unimplemented!("Non-ZSTD path not yet implemented.");
-    }
- */
-
     let path = Path::new(file_path);
-
-    let parse_options = CsvParseOptions::default()
-        .with_separator(b'\t')
-        .with_try_parse_dates(false)
-        .with_missing_is_null(true)
-        .with_truncate_ragged_lines(true);
-
-    let read_options = CsvReadOptions::default()
-        .with_parse_options(parse_options)
-        .with_ignore_errors(true)
-        .with_has_header(true);
-
-    let df = read_options
-        .try_into_reader_with_file_path(Some(path.to_path_buf()))?
-        .finish()?;
-
-    Ok(df)
+    
+    // Use different reader based on file extension
+    if file_path.ends_with(".zst") {
+        // For ZSTD compressed files, we need to uncompress first
+        let content = read_zst_file(path)?;
+        
+        // Use Cursor to read from memory
+        let cursor = Cursor::new(content);
+        
+        let df = CsvReader::new(cursor)
+            .with_separator(b'\t')
+            .has_header(true)
+            .with_ignore_errors(true)
+            .finish()?;
+        
+        Ok(df)
+    } else {
+        // For regular CSV files
+        let df = CsvReader::from_path(path)?
+            .with_separator(b'\t')
+            .has_header(true)
+            .with_ignore_errors(true)
+            .finish()?;
+        
+        Ok(df)
+    }
 }
 
-/*
- * Dead - remove ?
-/// Read a ZSTD compressed file into memory (unused)
-#[allow(dead_code)]
+/// Read a ZSTD compressed file into memory
 fn read_zst_file(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut decoder = zstd::Decoder::new(reader)?;
-
+    
     let mut buffer = Vec::new();
     decoder.read_to_end(&mut buffer)?;
-
+    
     Ok(buffer)
 }
-*/
-

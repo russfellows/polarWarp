@@ -1,7 +1,7 @@
 [package]
 name = "polarwarp-rs"
 version = "0.1.0"
-edition = "2025"
+edition = "2024"
 authors = ["Erik Bethke <ebethke@futurumgroup.com>"]
 description = "A Rust implementation of polarWarp for processing MinIO Warp output logs"
 readme = "README.md"
@@ -10,7 +10,8 @@ license = "Apache-2.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-polars = { version = "0.35.4", features = ["csv", "lazy", "dtype-datetime", "strings", "temporal", "describe", "ndarray", "zip_with", "performant"] }
+#polars = { version = "0.35.4", features = ["csv", "lazy", "dtype-datetime", "strings", "temporal", "describe", "ndarray", "zip_with", "performant"] }
+polars = { version = "0.46.0", features = ["csv", "decompress", "lazy", "dtype-datetime", "strings", "temporal", "describe", "ndarray", "zip_with", "performant"] }
 chrono = "0.4.31"
 clap = { version = "4.4.7", features = ["derive"] }
 csv = "1.3.0"

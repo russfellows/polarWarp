@@ -29,6 +29,7 @@ import polars as pl
 from datetime import datetime, timedelta
 import sys
 import re
+import time
 
 # Metadata operations that should be grouped together (matching Rust implementation)
 META_OPS = ["LIST", "HEAD", "DELETE", "STAT"]
@@ -62,7 +63,7 @@ def compute_summary_rows(df, run_time_secs):
         # Filter to just this category
         category_df = df.filter(pl.col("op").is_in(ops_list))
         
-        if category_df.height() == 0:
+        if category_df.height == 0:
             continue
         
         # Compute statistically valid percentiles on ALL raw data
@@ -172,6 +173,7 @@ global_end = None
 #
 for file_path in file_paths:
     print(f"\nProcessing file: {file_path}")
+    process_start = time.time()
     df = pl.read_csv(file_path, ignore_errors=True, separator='\t')
 
     # Note: parsing the ISO 8601 time is a bit tricky.  If the value ends in a literal capital "Z", then it may cause problems.  
@@ -282,6 +284,10 @@ for file_path in file_paths:
     throughput_metrics = throughput_metrics.with_columns(pl.col("op").cast(pl.Utf8))
 
     final_result = result.sort(["bucket_#", "op"])
+    
+    # Filter out rows with zero count (empty buckets or invalid data)
+    final_result = final_result.filter(pl.col("count") > 0)
+    
     final_result_pd = final_result.to_pandas()
 
 # List of columns to send to the pretty comma-fyer
@@ -301,11 +307,15 @@ for file_path in file_paths:
         if column in final_result_pd:
             final_result_pd[column] = final_result_pd[column].map(format_with_commas)
 
-    print(final_result_pd)
+    print(final_result_pd.to_string(index=False))
 
     # Print summary rows for META, GET, PUT (with statistically valid percentiles)
     summary_rows = compute_summary_rows(df, run_time_secs)
     print_summary_rows(summary_rows, columns_to_format)
+
+    # Print processing time (matching Rust output)
+    process_elapsed = time.time() - process_start
+    print(f"\nProcessed in {process_elapsed:.2f} seconds")
 
     consolidated_df = pl.concat([consolidated_df, df])
 

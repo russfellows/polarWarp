@@ -11,14 +11,18 @@ Python implementation of PolarWarp using [Polars](https://pola.rs/) for fast Dat
 
 ```bash
 cd python
-uv add polars pyarrow zstd
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -e .
 ```
 
 ### Using pip
 
 ```bash
 cd python
-pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
 ```
 
 ## Usage

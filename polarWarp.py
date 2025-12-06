@@ -167,27 +167,38 @@ for file_path in file_paths:
 
     print(f"The file run time in h:mm:ss is {run_time}, time in seconds is: {run_time_secs}")
 
-# Define the bucket order
-    bucket_order = ["NaN", "1 - 32k", "32k - 128k", "128k - 1mb", "1m - 8mb", "8m - 64mb", "64m - 999mb", ">= 1 gb"]
+# Define the bucket order (matching sai3-bench/polarwarp-rs)
+    bucket_order = ["zero", "1B-8KiB", "8KiB-64KiB", "64KiB-512KiB", "512KiB-4MiB", "4MiB-32MiB", "32MiB-256MiB", "256MiB-2GiB", ">2GiB"]
 
-# Create buckets for byte ranges, so that we can better understand multi object size results
+# Size bucket boundaries (matching sai3-bench)
+    BUCKET_8K = 8 * 1024           # 8 KiB
+    BUCKET_64K = 64 * 1024         # 64 KiB
+    BUCKET_512K = 512 * 1024       # 512 KiB
+    BUCKET_4M = 4 * 1024 * 1024    # 4 MiB
+    BUCKET_32M = 32 * 1024 * 1024  # 32 MiB
+    BUCKET_256M = 256 * 1024 * 1024  # 256 MiB
+    BUCKET_2G = 2 * 1024 * 1024 * 1024  # 2 GiB
+
+# Create buckets for byte ranges (matching sai3-bench bucket definitions)
     df = df.with_columns([
-        pl.when(pl.col("bytes") == 0).then(pl.lit(None))
-        .when((pl.col("bytes") >= 1) & (pl.col("bytes") < 32768)).then(pl.lit("1 - 32k"))
-        .when((pl.col("bytes") >= 32768) & (pl.col("bytes") < 131072)).then(pl.lit("32k - 128k"))
-        .when((pl.col("bytes") >= 131072) & (pl.col("bytes") < 1048576)).then(pl.lit("128k - 1mb"))
-        .when((pl.col("bytes") >= 1048576) & (pl.col("bytes") < 8388608)).then(pl.lit("1m - 8mb"))
-        .when((pl.col("bytes") >= 8388608) & (pl.col("bytes") < 67108864)).then(pl.lit("8m - 64mb"))
-        .when((pl.col("bytes") >= 67108864) & (pl.col("bytes") < 1047527423)).then(pl.lit("64m - 999mb"))
-        .otherwise(pl.lit(">= 1 gb")).alias("bytes_bucket"),
+        pl.when(pl.col("bytes") == 0).then(pl.lit("zero"))
+        .when((pl.col("bytes") >= 1) & (pl.col("bytes") < BUCKET_8K)).then(pl.lit("1B-8KiB"))
+        .when((pl.col("bytes") >= BUCKET_8K) & (pl.col("bytes") < BUCKET_64K)).then(pl.lit("8KiB-64KiB"))
+        .when((pl.col("bytes") >= BUCKET_64K) & (pl.col("bytes") < BUCKET_512K)).then(pl.lit("64KiB-512KiB"))
+        .when((pl.col("bytes") >= BUCKET_512K) & (pl.col("bytes") < BUCKET_4M)).then(pl.lit("512KiB-4MiB"))
+        .when((pl.col("bytes") >= BUCKET_4M) & (pl.col("bytes") < BUCKET_32M)).then(pl.lit("4MiB-32MiB"))
+        .when((pl.col("bytes") >= BUCKET_32M) & (pl.col("bytes") < BUCKET_256M)).then(pl.lit("32MiB-256MiB"))
+        .when((pl.col("bytes") >= BUCKET_256M) & (pl.col("bytes") < BUCKET_2G)).then(pl.lit("256MiB-2GiB"))
+        .otherwise(pl.lit(">2GiB")).alias("bytes_bucket"),
         pl.when(pl.col("bytes") == 0).then(0)
-        .when((pl.col("bytes") >= 1) & (pl.col("bytes") < 32768)).then(1)
-        .when((pl.col("bytes") >= 32768) & (pl.col("bytes") < 131072)).then(2)
-        .when((pl.col("bytes") >= 131072) & (pl.col("bytes") < 1048576)).then(3)
-        .when((pl.col("bytes") >= 1048576) & (pl.col("bytes") < 8388608)).then(4)
-        .when((pl.col("bytes") >= 8388608) & (pl.col("bytes") < 67108864)).then(5)
-        .when((pl.col("bytes") >= 67108864) & (pl.col("bytes") < 1047527423)).then(6)
-        .otherwise(7).alias("bucket_#")
+        .when((pl.col("bytes") >= 1) & (pl.col("bytes") < BUCKET_8K)).then(1)
+        .when((pl.col("bytes") >= BUCKET_8K) & (pl.col("bytes") < BUCKET_64K)).then(2)
+        .when((pl.col("bytes") >= BUCKET_64K) & (pl.col("bytes") < BUCKET_512K)).then(3)
+        .when((pl.col("bytes") >= BUCKET_512K) & (pl.col("bytes") < BUCKET_4M)).then(4)
+        .when((pl.col("bytes") >= BUCKET_4M) & (pl.col("bytes") < BUCKET_32M)).then(5)
+        .when((pl.col("bytes") >= BUCKET_32M) & (pl.col("bytes") < BUCKET_256M)).then(6)
+        .when((pl.col("bytes") >= BUCKET_256M) & (pl.col("bytes") < BUCKET_2G)).then(7)
+        .otherwise(8).alias("bucket_#")
     ])
 
 # Now group the results by operation type and our bucket sizes

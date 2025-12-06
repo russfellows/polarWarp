@@ -89,6 +89,8 @@ Matching sai3-bench bucket definitions:
 
 ## Performance
 
+### Speed Benchmarks
+
 | Build | Time per 230K records | Records/sec |
 |-------|----------------------|-------------|
 | Debug | ~2.5s | ~95,000 |
@@ -98,6 +100,19 @@ The release build is approximately **8x faster** than debug, thanks to:
 - Link-Time Optimization (LTO)
 - Single codegen unit
 - Maximum optimization level (opt-level = 3)
+
+### Resource Usage (2.32M records, 2 files consolidated)
+
+| Metric | Value |
+|--------|-------|
+| **Wall clock time** | 2.88 seconds |
+| **CPU utilization** | 263% (~3 cores) |
+| **Records/sec** | ~807,000 |
+| **Peak memory (RSS)** | 1,257 MB |
+| **Page swaps** | 0 |
+| **Major page faults** | 0 |
+
+Zero page swaps and zero major page faults means all data is processed entirely in RAM with no disk paging—even when consolidating multiple large files.
 
 ## Oplog File Format
 

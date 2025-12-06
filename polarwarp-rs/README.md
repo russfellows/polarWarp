@@ -1,32 +1,26 @@
 # PolarWarp-rs
 
-A Rust implementation of polarWarp for processing MinIO Warp object testing output logs.
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](Cargo.toml)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
-## Project Status
-
-⚠️ **This project is in early development** ⚠️
-
-Currently, PolarWarp-rs provides basic functionality to read and display MinIO Warp output files. More advanced features are planned - see the [ROADMAP.md](ROADMAP.md) file for details.
+A high-performance Rust implementation of polarWarp for analyzing storage I/O operation logs.
 
 ## Overview
 
-PolarWarp-rs aims to be a high-performance tool for analyzing MinIO Warp object testing output logs. It is a Rust port of the Python-based polarWarp tool, designed to provide efficient processing of large output files.
+PolarWarp-rs processes oplog files (TSV/CSV format, optionally zstd compressed) and computes detailed performance metrics including latency percentiles, throughput, and ops/sec—all grouped by operation type and object size buckets.
 
-The goal is to provide a compiled binary that can be distributed without sharing source code, while matching or exceeding the performance of the original Python implementation.
+Built with [Polars](https://pola.rs/) for blazing-fast DataFrame operations, polarwarp-rs can process **~800,000 records per second** in release mode.
 
 ## Features
 
-Current:
-- Reading MinIO Warp output logs (CSV/ZSTD compressed)
-- Basic file information display
-- Command-line interface
-
-Planned:
-- Size-based object bucketing
-- Statistical analysis (latency percentiles, throughput, ops/sec)
-- Multi-file processing with result consolidation
-- Time-skip option to exclude warmup periods
-- Formatted output with human-readable numbers
+- **Multi-format support**: TSV and CSV files, with automatic zstd decompression
+- **Size-bucketed analysis**: 9 size buckets matching sai3-bench (zero, 1B-8KiB, 8KiB-64KiB, ... >2GiB)
+- **Latency percentiles**: mean, median, p90, p95, p99, max
+- **Throughput metrics**: ops/sec and MiB/sec per bucket
+- **Multi-file consolidation**: Combine results from multiple agents/files
+- **Time skip**: Exclude warmup periods with `--skip` option
+- **Fast**: ~300ms to process 230K+ records (release build)
 
 ## Installation
 
@@ -34,10 +28,10 @@ Planned:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/polarwarp-rs.git
-cd polarwarp-rs
+git clone https://github.com/russfellows/polarWarp.git
+cd polarWarp/polarwarp-rs
 
-# Build the release version
+# Build the release version (recommended)
 cargo build --release
 
 # The binary will be available at target/release/polarwarp-rs
@@ -46,30 +40,94 @@ cargo build --release
 ## Usage
 
 ```bash
-# Get help
+# Display help
 polarwarp-rs --help
 
-# Process a file with basic stats
-polarwarp-rs --basic-stats your_file.csv
+# Process a single file
+polarwarp-rs oplog.tsv.zst
 
-# Process a compressed file
-polarwarp-rs --basic-stats your_file.csv.zst
+# Process multiple files (results are consolidated)
+polarwarp-rs agent-1-oplog.tsv.zst agent-2-oplog.tsv.zst
+
+# Skip first 2 minutes of warmup
+polarwarp-rs --skip 2m oplog.tsv.zst
+
+# Show basic file info only
+polarwarp-rs --basic-stats oplog.tsv.zst
 ```
 
 ### Command Line Options
 
-- `--basic-stats`: Show basic information about the file without processing
-- `--skip <SKIP>`: Skip a specified amount of time from the start of each file (e.g., "90s", "5m") - *not yet implemented*
-- `--help`: Display help information
-- `--version`: Display version information
+| Option | Description |
+|--------|-------------|
+| `<FILES>...` | Input files to process (TSV/CSV, optionally zstd compressed) |
+| `-s, --skip <TIME>` | Skip warmup time from start (e.g., "90s", "5m") |
+| `--basic-stats` | Show basic file info without full processing |
+| `-h, --help` | Display help information |
+| `-V, --version` | Display version information |
+
+## Output Format
+
+```
+      op bytes_bucket bucket_# mean_lat_us med._lat_us 90%_lat_us 95%_lat_us 99%_lat_us max_lat_us avg_obj_KB ops_/_sec xput_MBps     count
+    LIST         zero        0      533.98      533.98     533.98     533.98     533.98     533.98       0.00      0.20      0.00         1
+     GET      1B-8KiB        1       76.18       71.97     114.27     128.50     160.82   1,173.53       4.00 47,394.46    185.13   236,971
+```
+
+### Size Buckets
+
+Matching sai3-bench bucket definitions:
+
+| Bucket # | Label | Size Range |
+|----------|-------|------------|
+| 0 | zero | 0 bytes (metadata ops) |
+| 1 | 1B-8KiB | 1 B to 8 KiB |
+| 2 | 8KiB-64KiB | 8 KiB to 64 KiB |
+| 3 | 64KiB-512KiB | 64 KiB to 512 KiB |
+| 4 | 512KiB-4MiB | 512 KiB to 4 MiB |
+| 5 | 4MiB-32MiB | 4 MiB to 32 MiB |
+| 6 | 32MiB-256MiB | 32 MiB to 256 MiB |
+| 7 | 256MiB-2GiB | 256 MiB to 2 GiB |
+| 8 | >2GiB | Greater than 2 GiB |
 
 ## Performance
 
-The original Python polarWarp tool is already ~37x faster than MinIO's native tools. We aim to make PolarWarp-rs even faster and more memory-efficient.
+| Build | Time per 230K records | Records/sec |
+|-------|----------------------|-------------|
+| Debug | ~2.5s | ~95,000 |
+| Release | ~300ms | ~780,000 |
 
-## Contributing
+The release build is approximately **8x faster** than debug, thanks to:
+- Link-Time Optimization (LTO)
+- Single codegen unit
+- Maximum optimization level (opt-level = 3)
 
-Contributions are welcome! Please check the [ROADMAP.md](ROADMAP.md) file for areas where help is needed.
+## Oplog File Format
+
+Expected TSV columns (matching sai3-bench oplog format):
+
+```
+idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  first_byte  end  duration_ns
+```
+
+## Dependencies
+
+- [Polars](https://pola.rs/) - Fast DataFrame library
+- [Clap](https://clap.rs/) - Command-line argument parsing
+- [Chrono](https://docs.rs/chrono/) - Date/time handling
+- [zstd](https://docs.rs/zstd/) - Zstandard compression
+
+## Related Projects
+
+- **sai3-bench** - Multi-protocol I/O benchmarking suite
+- **polarWarp** (Python) - Original Python implementation
+
+## Future Enhancements
+
+- Export to TSV/CSV/JSON formats
+- Parallel file processing with Rayon
+- Time-window analysis for detecting performance changes
+- Comparative analysis between test runs
 
 ## License
 

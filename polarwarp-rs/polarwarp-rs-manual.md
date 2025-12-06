@@ -1,11 +1,12 @@
 # PolarWarp-rs User Manual
 
-A lightweight guide for using PolarWarp-rs - the high-performance Rust implementation for analyzing MinIO Warp test results.
+A guide for using PolarWarp-rs - the high-performance Rust implementation for analyzing storage I/O operation logs.
 
 ## Table of Contents
 - [Installation](#installation)
 - [Basic Usage](#basic-usage)
 - [Command Line Options](#command-line-options)
+- [Output Format](#output-format)
 - [File Formats](#file-formats)
 - [Performance Expectations](#performance-expectations)
 - [Troubleshooting](#troubleshooting)
@@ -21,12 +22,12 @@ sudo mv polarwarp-rs /usr/local/bin/
 ```
 
 ### From Source
-Build from source for the optimal performance or customization:
+Build from source for optimal performance:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/polarwarp-rs.git
-cd polarwarp-rs
+git clone https://github.com/russfellows/polarWarp.git
+cd polarWarp/polarwarp-rs
 
 # Build optimized release version
 cargo build --release
@@ -37,62 +38,110 @@ cargo build --release
 
 ## Basic Usage
 
-PolarWarp-rs is designed to work with MinIO Warp output logs in CSV format (raw or ZSTD compressed).
+PolarWarp-rs processes oplog files in TSV or CSV format (raw or ZSTD compressed).
 
 ### Analyzing a Single File
 
 ```bash
-# View basic file information
-polarwarp-rs --basic-stats your_file.csv
+# Full analysis with latency percentiles and throughput
+polarwarp-rs oplog.tsv.zst
 
-# Process a compressed file
-polarwarp-rs your_file.csv.zst
+# View basic file information only
+polarwarp-rs --basic-stats oplog.tsv.zst
 ```
 
 ### Processing Multiple Files
 
 ```bash
 # Analyze multiple files with consolidated results
-polarwarp-rs file1.csv file2.csv file3.csv.zst
+polarwarp-rs agent-1-oplog.tsv.zst agent-2-oplog.tsv.zst
 ```
 
 ### Skipping Warm-up Periods
 
 ```bash
 # Skip the first 90 seconds of test data
-polarwarp-rs --skip 90s your_file.csv
+polarwarp-rs --skip 90s oplog.tsv.zst
 
-# Skip the first 5 minutes of test data
-polarwarp-rs --skip 5m your_file.csv.zst
+# Skip the first 2 minutes of test data
+polarwarp-rs --skip 2m oplog.tsv.zst
 ```
 
 ## Command Line Options
 
 | Option | Description |
 |--------|-------------|
+| `<FILES>...` | Input files to process (required) |
+| `-s, --skip <TIME>` | Skip initial warm-up period (e.g., "90s", "5m") |
 | `--basic-stats` | Show only basic file information without full processing |
-| `--skip <TIME>` | Skip initial warm-up period (e.g., "90s", "5m") |
-| `--help` | Display help information |
-| `--version` | Show version information |
+| `-h, --help` | Display help information |
+| `-V, --version` | Show version information |
+
+## Output Format
+
+PolarWarp-rs outputs a table with the following columns:
+
+| Column | Description |
+|--------|-------------|
+| `op` | Operation type (GET, PUT, LIST, DELETE, etc.) |
+| `bytes_bucket` | Size bucket label |
+| `bucket_#` | Bucket number (0-8) |
+| `mean_lat_us` | Mean latency in microseconds |
+| `med._lat_us` | Median (p50) latency in microseconds |
+| `90%_lat_us` | 90th percentile latency |
+| `95%_lat_us` | 95th percentile latency |
+| `99%_lat_us` | 99th percentile latency |
+| `max_lat_us` | Maximum latency |
+| `avg_obj_KB` | Average object size in KiB |
+| `ops_/_sec` | Operations per second |
+| `xput_MBps` | Throughput in MiB/sec |
+| `count` | Number of operations |
+
+### Size Buckets
+
+| Bucket # | Label | Size Range |
+|----------|-------|------------|
+| 0 | zero | 0 bytes (metadata ops) |
+| 1 | 1B-8KiB | 1 B to 8 KiB |
+| 2 | 8KiB-64KiB | 8 KiB to 64 KiB |
+| 3 | 64KiB-512KiB | 64 KiB to 512 KiB |
+| 4 | 512KiB-4MiB | 512 KiB to 4 MiB |
+| 5 | 4MiB-32MiB | 4 MiB to 32 MiB |
+| 6 | 32MiB-256MiB | 32 MiB to 256 MiB |
+| 7 | 256MiB-2GiB | 256 MiB to 2 GiB |
+| 8 | >2GiB | Greater than 2 GiB |
 
 ## File Formats
 
 PolarWarp-rs supports the following file formats:
-- `.csv` - Standard CSV files with tab delimiters
+- `.tsv` - Tab-separated values (default for sai3-bench oplogs)
+- `.tsv.zst` - ZSTD compressed TSV files
+- `.csv` - Comma-separated values
 - `.csv.zst` - ZSTD compressed CSV files
 
-The tool automatically detects the format based on file extension.
+The tool automatically detects the separator based on file extension.
+
+### Expected Columns
+
+Oplog files should have these columns (matching sai3-bench format):
+```
+idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  first_byte  end  duration_ns
+```
 
 ## Performance Expectations
 
 PolarWarp-rs is designed for high performance:
 
-| Metric | Typical Value |
-|--------|---------------|
-| Processing speed | ~300ms for 41MB file (~20.5 MB/s) |
-| Memory usage | ~756MB peak |
-| CPU utilization | Efficiently uses multiple cores (>350% utilization) |
-| Binary size | Compact 10MB executable |
+| Metric | Debug Build | Release Build |
+|--------|-------------|---------------|
+| Processing speed | ~95K records/sec | ~780K records/sec |
+| 230K record file | ~2.5 seconds | ~300 ms |
+| Speedup | baseline | ~8x faster |
+
+Release build optimizations:
+- Link-Time Optimization (LTO)
+- Single codegen unit
+- Maximum optimization level (opt-level = 3)
 
 ## Troubleshooting
 

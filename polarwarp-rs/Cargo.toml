@@ -2,8 +2,8 @@
 name = "polarwarp-rs"
 version = "0.1.0"
 edition = "2024"
-authors = ["Erik Bethke <ebethke@futurumgroup.com>"]
-description = "A Rust implementation of polarWarp for processing MinIO Warp output logs"
+authors = ["Russ Fellows <russ.fellows@gmail.com>"]
+description = "A Rust implementation of polarWarp for processing oplog files"
 readme = "README.md"
 license = "Apache-2.0"
 

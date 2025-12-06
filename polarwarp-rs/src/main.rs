@@ -1,7 +1,7 @@
-// polarwarp-rs: A Rust implementation of polarWarp for processing oplog files
+// SPDX-FileCopyrightText: 2025 Russ Fellows <russ.fellows@gmail.com>
+// SPDX-License-Identifier: Apache-2.0
 //
-// Copyright 2025, Signal65 / Futurum Group Limited. All rights reserved.
-// Licensed under the Apache License, Version 2.0
+// polarwarp-rs: A Rust implementation of polarWarp for processing oplog files
 
 use std::path::Path;
 use std::time::Instant;

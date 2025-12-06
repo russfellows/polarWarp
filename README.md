@@ -22,10 +22,20 @@ PolarWarp is available in two implementations with identical functionality and o
 
 | Implementation | Speed | Best For |
 |----------------|-------|----------|
-| [**Rust**](rust/) | ~830K records/sec | Production use, large files, compiled binary |
-| [**Python**](python/) | ~1.4M records/sec* | Quick analysis, scripting, no compilation |
+| [**Rust**](rust/) | ~870K records/sec | Production use, large files, compiled binary |
+| [**Python**](python/) | ~850K records/sec | Quick analysis, scripting, no compilation |
 
-*Python speed measured on different hardware; both are significantly faster than MinIO's native tools.
+### Performance Comparison
+
+Benchmark results processing a 1.16M operation mixed workload log (zstd compressed):
+
+| Tool | Time | Speedup |
+|------|------|--------|
+| **PolarWarp (Rust)** | 1.34s | **8.4x faster** |
+| **PolarWarp (Python)** | 1.36s | **8.2x faster** |
+| MinIO `warp analyze` | 11.19s | baseline |
+
+Both PolarWarp implementations provide **8x faster** analysis than MinIO's native `warp analyze` tool, while also providing more detailed per-bucket latency breakdowns.
 
 ### Quick Start - Rust
 

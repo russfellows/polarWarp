@@ -1,6 +1,6 @@
 # PolarWarp - Rust Implementation
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.1-blue.svg)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](../LICENSE)
 
@@ -10,17 +10,18 @@ A high-performance Rust implementation of PolarWarp for analyzing storage I/O op
 
 PolarWarp-rs processes oplog files (TSV/CSV format, optionally zstd compressed) and computes detailed performance metrics including latency percentiles, throughput, and ops/sec—all grouped by operation type and object size buckets.
 
-Built with [Polars](https://pola.rs/) for blazing-fast DataFrame operations, polarwarp-rs can process **~780,000 records per second** in release mode.
+Built with [Polars](https://pola.rs/) for blazing-fast DataFrame operations, polarwarp-rs can process **~830,000 records per second** in release mode.
 
 ## Features
 
-- **Multi-format support**: TSV and CSV files, with automatic zstd decompression
+- **Multi-format support**: TSV and CSV files, with automatic zstd decompression and separator detection
 - **Size-bucketed analysis**: 9 size buckets matching sai3-bench (zero, 1B-8KiB, 8KiB-64KiB, ... >2GiB)
-- **Latency percentiles**: mean, median, p90, p95, p99, max
+- **Summary rows**: Aggregate statistics for META (LIST/HEAD/DELETE/STAT), GET, and PUT operations
+- **Latency percentiles**: mean, median, p90, p95, p99, max (statistically valid, not averaged)
 - **Throughput metrics**: ops/sec and MiB/sec per bucket
 - **Multi-file consolidation**: Combine results from multiple agents/files
 - **Time skip**: Exclude warmup periods with `--skip` option
-- **Fast**: ~300ms to process 230K+ records (release build)
+- **Fast**: ~1.3s to process 1.16M records (release build)
 
 ## Installation
 

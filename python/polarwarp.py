@@ -30,6 +30,9 @@ from datetime import datetime, timedelta
 import sys
 import re
 
+# Metadata operations that should be grouped together (matching Rust implementation)
+META_OPS = ["LIST", "HEAD", "DELETE", "STAT"]
+
 # Function to pretty up the output, by adding commas for readability, and using 4 digits for float
 def format_with_commas(value):
     if isinstance(value, (int, float)):
@@ -39,6 +42,75 @@ def format_with_commas(value):
         else:
             return f"{value:,}"
     return value  # Return the value unchanged if it's not numeric
+
+
+def compute_summary_rows(df, run_time_secs):
+    """
+    Compute summary rows for operation categories (META, GET, PUT).
+    Returns a list of summary row dictionaries with statistically valid percentiles.
+    """
+    summary_rows = []
+    
+    # Define operation categories: (category_name, operations_list, bucket_idx)
+    categories = [
+        ("META", META_OPS, 97),
+        ("GET", ["GET"], 98),
+        ("PUT", ["PUT"], 99),
+    ]
+    
+    for category_name, ops_list, bucket_idx in categories:
+        # Filter to just this category
+        category_df = df.filter(pl.col("op").is_in(ops_list))
+        
+        if category_df.height() == 0:
+            continue
+        
+        # Compute statistically valid percentiles on ALL raw data
+        stats = category_df.select([
+            (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
+            (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
+            (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
+            (pl.col("duration_ns").quantile(0.95) / 1000).alias("95%_lat_us"),
+            (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
+            (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
+            (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
+            (pl.count("op") / run_time_secs).alias("ops_/_sec"),
+            ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias("xput_MBps"),
+            pl.count("op").alias("count"),
+        ])
+        
+        row = stats.row(0, named=True)
+        row["op"] = category_name
+        row["bytes_bucket"] = "ALL"
+        row["bucket_#"] = bucket_idx
+        summary_rows.append(row)
+    
+    return summary_rows
+
+
+def print_summary_rows(summary_rows, columns_to_format):
+    """Print summary rows with formatting."""
+    import pandas as pd
+    
+    if not summary_rows:
+        return
+    
+    print()  # Separator line
+    
+    summary_df = pd.DataFrame(summary_rows)
+    # Reorder columns to match main output
+    column_order = ["op", "bytes_bucket", "bucket_#", "mean_lat_us", "med._lat_us", 
+                    "90%_lat_us", "95%_lat_us", "99%_lat_us", "max_lat_us", 
+                    "avg_obj_KB", "ops_/_sec", "xput_MBps", "count"]
+    summary_df = summary_df[[c for c in column_order if c in summary_df.columns]]
+    
+    for column in columns_to_format:
+        if column in summary_df:
+            summary_df[column] = summary_df[column].map(format_with_commas)
+    
+    # Print without index, matching main output style
+    print(summary_df.to_string(index=False))
+
 
 #######
 
@@ -231,6 +303,10 @@ for file_path in file_paths:
 
     print(final_result_pd)
 
+    # Print summary rows for META, GET, PUT (with statistically valid percentiles)
+    summary_rows = compute_summary_rows(df, run_time_secs)
+    print_summary_rows(summary_rows, columns_to_format)
+
     consolidated_df = pl.concat([consolidated_df, df])
 
     # Append the metrics to consolidated_throughputs
@@ -314,3 +390,7 @@ for column in columns_to_format:
 
 print("Consolidated Results:")
 print(consolidated_stats_pd)
+
+# Print summary rows for consolidated results (with statistically valid percentiles)
+summary_rows = compute_summary_rows(consolidated_df, consolidated_run_secs)
+print_summary_rows(summary_rows, columns_to_format)

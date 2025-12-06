@@ -8,9 +8,10 @@ High-performance tool for analyzing storage I/O operation logs (oplog files from
 
 ## Features
 
-- **Multi-format support**: TSV and CSV files, with automatic zstd decompression
+- **Multi-format support**: TSV and CSV files, with automatic zstd decompression and separator detection
 - **Size-bucketed analysis**: 9 size buckets (zero, 1B-8KiB, ... >2GiB)
-- **Latency percentiles**: mean, median, p90, p95, p99, max
+- **Summary rows**: Aggregate statistics for META (LIST/HEAD/DELETE/STAT), GET, and PUT operations
+- **Latency percentiles**: mean, median, p90, p95, p99, max (statistically valid)
 - **Throughput metrics**: ops/sec and MiB/sec per bucket
 - **Multi-file consolidation**: Combine results from multiple agents
 - **Time skip**: Exclude warmup periods with `--skip` option
@@ -21,7 +22,7 @@ PolarWarp is available in two implementations with identical functionality and o
 
 | Implementation | Speed | Best For |
 |----------------|-------|----------|
-| [**Rust**](rust/) | ~780K records/sec | Production use, large files, compiled binary |
+| [**Rust**](rust/) | ~830K records/sec | Production use, large files, compiled binary |
 | [**Python**](python/) | ~1.4M records/sec* | Quick analysis, scripting, no compilation |
 
 *Python speed measured on different hardware; both are significantly faster than MinIO's native tools.

@@ -37,6 +37,9 @@ const BUCKET_LABELS: [&str; NUM_BUCKETS] = [
     ">2GiB",        // Bucket 8
 ];
 
+/// Metadata operations that should be grouped together
+const META_OPS: [&str; 4] = ["LIST", "HEAD", "DELETE", "STAT"];
+
 /// CLI arguments
 #[derive(Parser)]
 #[command(
@@ -80,6 +83,43 @@ fn parse_skip_time(skip: &str) -> Result<i64> {
         Ok(nanos)
     } else {
         anyhow::bail!("Invalid skip format '{}'. Use format like '90s' or '5m'", skip)
+    }
+}
+
+/// Detect the separator used in a file by examining the header line
+/// Returns tab if tabs found, comma if commas found, defaults to tab
+fn detect_separator(file_path: &str) -> Result<u8> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    
+    let file = File::open(file_path)?;
+    
+    // Handle zstd compressed files
+    let first_line = if file_path.ends_with(".zst") {
+        let decoder = zstd::stream::read::Decoder::new(file)?;
+        let mut reader = BufReader::new(decoder);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        line
+    } else {
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        line
+    };
+    
+    // Count tabs vs commas in header line
+    let tab_count = first_line.matches('\t').count();
+    let comma_count = first_line.matches(',').count();
+    
+    // Use whichever delimiter appears more often
+    // This handles cases where .csv files are actually tab-separated (like warp output)
+    if tab_count > comma_count {
+        Ok(b'\t')
+    } else if comma_count > 0 {
+        Ok(b',')
+    } else {
+        Ok(b'\t')  // Default to tab
     }
 }
 
@@ -265,14 +305,8 @@ fn process_file(
 fn read_tsv_file(file_path: &str) -> Result<DataFrame> {
     let path = Path::new(file_path);
     
-    // Determine separator based on file extension
-    // Remove .zst suffix if present to check actual file type
-    let base_name = file_path.trim_end_matches(".zst");
-    let separator = if base_name.ends_with(".csv") {
-        b','
-    } else {
-        b'\t'  // Default to TSV
-    };
+    // Detect separator by reading first line of the file
+    let separator = detect_separator(file_path)?;
 
     let parse_options = CsvParseOptions::default()
         .with_separator(separator)
@@ -479,6 +513,11 @@ fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str) ->
         let xp = xput.get(i).unwrap_or(0.0);
         let cnt = count_col.get(i).unwrap_or(0);
 
+        // Skip rows with zero count (empty buckets or invalid data)
+        if cnt == 0 {
+            continue;
+        }
+
         println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
                  op, bucket, bucket_num,
                  format_with_commas(mean),
@@ -493,14 +532,98 @@ fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str) ->
                  format_int_with_commas(cnt as i64));
     }
 
-    // Print summary totals (only if not consolidated view)
-    if title.is_empty() {
-        let total_ops: u64 = count_col.into_iter().flatten().map(|x| x as u64).sum();
-        let total_ops_sec: f64 = total_ops as f64 / run_time_secs;
-        println!("\nTotal operations: {}  ({:.2}/sec)", 
-                 format_int_with_commas(total_ops as i64),
-                 total_ops_sec);
+    // Print summary rows for each operation category (META, GET, PUT)
+    // These use statistically valid percentiles computed from ALL raw data
+    println!(); // Separator line before summaries
+    
+    // Compute summary for META operations (LIST, HEAD, DELETE, STAT)
+    compute_and_print_summary_row(df, run_time_secs, "META", &META_OPS, 97)?;
+    
+    // Compute summary for GET operations
+    compute_and_print_summary_row(df, run_time_secs, "GET", &["GET"], 98)?;
+    
+    // Compute summary for PUT operations
+    compute_and_print_summary_row(df, run_time_secs, "PUT", &["PUT"], 99)?;
+
+    // Print grand total
+    let total_ops: u64 = count_col.into_iter().flatten().map(|x| x as u64).sum();
+    let total_ops_sec: f64 = total_ops as f64 / run_time_secs;
+    println!("\nTotal operations: {}  ({:.2}/sec)", 
+             format_int_with_commas(total_ops as i64),
+             total_ops_sec);
+
+    Ok(())
+}
+
+/// Compute and print a summary row for a category of operations
+/// This computes statistically valid percentiles from ALL raw data (not averaged)
+fn compute_and_print_summary_row(
+    df: &DataFrame, 
+    run_time_secs: f64, 
+    category: &str, 
+    ops: &[&str],
+    bucket_idx: i32,
+) -> Result<()> {
+    // Build filter for matching operations
+    let mut filter_expr = lit(false);
+    for op in ops {
+        filter_expr = filter_expr.or(col("op").eq(lit(*op)));
     }
+    
+    // Filter to just this category and compute stats
+    let category_stats = df.clone().lazy()
+        .filter(filter_expr)
+        .select([
+            // Latency statistics (convert ns to µs) - computed on ALL raw data
+            (col("duration_ns").mean() / lit(1000.0)).alias("mean_lat_us"),
+            (col("duration_ns").median() / lit(1000.0)).alias("med_lat_us"),
+            (col("duration_ns").quantile(lit(0.90), QuantileMethod::Linear) / lit(1000.0)).alias("p90_lat_us"),
+            (col("duration_ns").quantile(lit(0.95), QuantileMethod::Linear) / lit(1000.0)).alias("p95_lat_us"),
+            (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99_lat_us"),
+            (col("duration_ns").max() / lit(1000.0)).alias("max_lat_us"),
+            // Size statistics
+            (col("bytes").mean() / lit(1024.0)).alias("avg_obj_KB"),
+            // Throughput (sum of counts and bytes)
+            (col("op").count().cast(DataType::Float64) / lit(run_time_secs)).alias("ops_per_sec"),
+            ((col("bytes").sum().cast(DataType::Float64) / lit(1024.0 * 1024.0)) / lit(run_time_secs)).alias("xput_MBps"),
+            col("op").count().alias("count"),
+        ])
+        .collect()?;
+
+    // Check if we have any data for this category
+    if category_stats.height() == 0 {
+        return Ok(());
+    }
+    
+    let count = category_stats.column("count")?.u32()?.get(0).unwrap_or(0);
+    if count == 0 {
+        return Ok(());
+    }
+
+    // Extract values
+    let mean = category_stats.column("mean_lat_us")?.f64()?.get(0).unwrap_or(0.0);
+    let med = category_stats.column("med_lat_us")?.f64()?.get(0).unwrap_or(0.0);
+    let p90 = category_stats.column("p90_lat_us")?.f64()?.get(0).unwrap_or(0.0);
+    let p95 = category_stats.column("p95_lat_us")?.f64()?.get(0).unwrap_or(0.0);
+    let p99 = category_stats.column("p99_lat_us")?.f64()?.get(0).unwrap_or(0.0);
+    let max = category_stats.column("max_lat_us")?.f64()?.get(0).unwrap_or(0.0);
+    let avg = category_stats.column("avg_obj_KB")?.f64()?.get(0).unwrap_or(0.0);
+    let ops = category_stats.column("ops_per_sec")?.f64()?.get(0).unwrap_or(0.0);
+    let xp = category_stats.column("xput_MBps")?.f64()?.get(0).unwrap_or(0.0);
+
+    // Print summary row with "ALL" as bucket label
+    println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
+             category, "ALL", bucket_idx,
+             format_with_commas(mean),
+             format_with_commas(med),
+             format_with_commas(p90),
+             format_with_commas(p95),
+             format_with_commas(p99),
+             format_with_commas(max),
+             format_with_commas(avg),
+             format_with_commas(ops),
+             format_with_commas(xp),
+             format_int_with_commas(count as i64));
 
     Ok(())
 }

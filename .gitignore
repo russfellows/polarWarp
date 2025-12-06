@@ -37,6 +37,10 @@ target/**/*
 *.pdb
 Cargo.lock
 
+# Stray binaries (release builds should be in target/)
+polarwarp-rs/polarwarp-rs-bin
+*-bin
+
 # More detailed Cargo ignores
 **/.fingerprint/
 **/.cargo-lock

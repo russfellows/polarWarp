@@ -1,16 +1,16 @@
-# PolarWarp-rs
+# PolarWarp - Rust Implementation
 
 [![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](../LICENSE)
 
-A high-performance Rust implementation of polarWarp for analyzing storage I/O operation logs.
+A high-performance Rust implementation of PolarWarp for analyzing storage I/O operation logs.
 
 ## Overview
 
 PolarWarp-rs processes oplog files (TSV/CSV format, optionally zstd compressed) and computes detailed performance metrics including latency percentiles, throughput, and ops/sec—all grouped by operation type and object size buckets.
 
-Built with [Polars](https://pola.rs/) for blazing-fast DataFrame operations, polarwarp-rs can process **~800,000 records per second** in release mode.
+Built with [Polars](https://pola.rs/) for blazing-fast DataFrame operations, polarwarp-rs can process **~780,000 records per second** in release mode.
 
 ## Features
 
@@ -27,10 +27,6 @@ Built with [Polars](https://pola.rs/) for blazing-fast DataFrame operations, pol
 ### From Source
 
 ```bash
-# Clone the repository
-git clone https://github.com/russfellows/polarWarp.git
-cd polarWarp/polarwarp-rs
-
 # Build the release version (recommended)
 cargo build --release
 

@@ -7,7 +7,7 @@
 #
 #    Using the Polars package to efficiently process data, this program operates approximately 
 #    20x faster than the default warp processing tool.  Additionally, this version uses about 
-#    10X memory than the default program, perhaps less.  If memory usage is still an issue, 
+#    10X *less* memory than the warp program, perhaps less.  If memory usage is still an issue, 
 #    this program may be modified, by reducing the "bytes_bucket" dataFrame based on the 
 #    values in the column "bytes".  Each reduction in the decision tree, reduces memory usage 
 #    by about 10 - 15%.  Currently, there are 8 buckets.  Reducing this to 4 buckets, would 

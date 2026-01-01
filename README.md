@@ -1,6 +1,6 @@
 # PolarWarp
 
-[![Version](https://img.shields.io/badge/version-0.1.3-brightgreen.svg)](https://github.com/russfellows/polarWarp/releases)
+[![Version](https://img.shields.io/badge/version-0.1.4-brightgreen.svg)](https://github.com/russfellows/polarWarp/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](python/)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](rust/)
@@ -12,6 +12,7 @@ High-performance tool for analyzing storage I/O operation logs (oplog files from
 - **Multi-format support**: TSV and CSV files, with automatic zstd decompression and separator detection
 - **Size-bucketed analysis**: 9 size buckets (zero, 1B-8KiB, ... >2GiB)
 - **Summary rows**: Aggregate statistics for META (LIST/HEAD/DELETE/STAT), GET, and PUT operations
+- **Per-client statistics**: Compare performance across multiple clients with `--per-client` option
 - **Latency percentiles**: mean, median, p90, p95, p99, max (statistically valid)
 - **Throughput metrics**: ops/sec and MiB/sec per bucket
 - **Multi-file consolidation**: Combine results from multiple agents
@@ -91,6 +92,12 @@ Measured scaling factors (1 file → 2 files, each 1.16M operations):
 cd rust
 cargo build --release
 ./target/release/polarwarp-rs oplog.tsv.zst
+
+# Skip warmup period
+./target/release/polarwarp-rs --skip=90s oplog.tsv.zst
+
+# Compare performance across multiple clients
+./target/release/polarwarp-rs --per-client oplog.tsv.zst
 ```
 
 ### Quick Start - Python
@@ -98,6 +105,12 @@ cargo build --release
 ```bash
 cd python
 uv run ./polarwarp.py oplog.csv.zst
+
+# Skip warmup period
+uv run ./polarwarp.py --skip=90s oplog.csv.zst
+
+# Compare performance across multiple clients
+uv run ./polarwarp.py --per-client oplog.csv.zst
 ```
 
 ## Output Format
@@ -109,6 +122,46 @@ Both implementations produce identical output:
     LIST         zero        0      533.98      533.98     533.98     533.98     533.98     533.98       0.00      0.20      0.00         1
      GET      1B-8KiB        1       76.18       71.97     114.27     128.50     160.82   1,173.53       4.00 47,394.46    185.13   236,971
 ```
+
+## Per-Client Statistics
+
+When running tests with multiple clients (each with a unique `client_id` in the oplog), use the `--per-client` flag to see performance variation across clients:
+
+```bash
+# Rust
+./target/release/polarwarp-rs --per-client multi_client_oplog.csv.zst
+
+# Python
+uv run ./polarwarp.py --per-client multi_client_oplog.csv.zst
+```
+
+This produces additional output showing:
+- Overall statistics per client (latency, throughput, ops/sec)
+- Per-client breakdown by operation type (META, GET, PUT)
+
+Example output:
+```
+================================================================================
+Per-Client Statistics (2 clients detected)
+================================================================================
+      client_id mean_lat_us med._lat_us 90%_lat_us 95%_lat_us 99%_lat_us max_lat_us avg_obj_KB ops_/_sec xput_MBps     count
+        client1    5,576.82    3,169.10  11,726.88  17,209.86  37,049.76  59,383.34   1,004.26  1,822.37  1,787.24     5,000
+        client2    5,356.29    3,164.20  11,226.17  15,567.94  34,929.35  52,315.44   1,000.71  1,822.37  1,780.93     5,000
+
+Per-Client Statistics by Operation Type:
+--------------------------------------------------------------------------------
+
+GET Operations:
+      client_id mean_lat_us med._lat_us 99%_lat_us ops_/_sec xput_MBps     count
+        client1    5,042.83    3,634.59  17,249.31    820.07  1,323.39     2,250
+        client2    4,997.21    3,674.98  16,892.96    820.07  1,366.02     2,250
+```
+
+This helps identify:
+- **Performance variability** between clients
+- **Outlier clients** with higher latency or lower throughput
+- **Load balancing issues** or network bottlenecks
+- **Client-specific problems** in distributed tests
 
 ## Size Buckets
 

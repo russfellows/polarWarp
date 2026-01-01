@@ -1,6 +1,6 @@
 # PolarWarp
 
-[![Version](https://img.shields.io/badge/version-0.1.2-brightgreen.svg)](https://github.com/russfellows/polarWarp/releases)
+[![Version](https://img.shields.io/badge/version-0.1.3-brightgreen.svg)](https://github.com/russfellows/polarWarp/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](python/)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](rust/)

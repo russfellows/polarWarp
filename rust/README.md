@@ -17,6 +17,7 @@ Built with [Polars](https://pola.rs/) for blazing-fast DataFrame operations, pol
 - **Multi-format support**: TSV and CSV files, with automatic zstd decompression and separator detection
 - **Size-bucketed analysis**: 9 size buckets matching sai3-bench (zero, 1B-8KiB, 8KiB-64KiB, ... >2GiB)
 - **Summary rows**: Aggregate statistics for META (LIST/HEAD/DELETE/STAT), GET, and PUT operations
+- **Per-client statistics**: Compare performance across multiple clients with `--per-client` option
 - **Latency percentiles**: mean, median, p90, p95, p99, max (statistically valid, not averaged)
 - **Throughput metrics**: ops/sec and MiB/sec per bucket
 - **Multi-file consolidation**: Combine results from multiple agents/files
@@ -49,6 +50,9 @@ polarwarp-rs agent-1-oplog.tsv.zst agent-2-oplog.tsv.zst
 # Skip first 2 minutes of warmup
 polarwarp-rs --skip 2m oplog.tsv.zst
 
+# Compare performance across multiple clients
+polarwarp-rs --per-client multi_client_oplog.csv.zst
+
 # Show basic file info only
 polarwarp-rs --basic-stats oplog.tsv.zst
 ```
@@ -59,6 +63,7 @@ polarwarp-rs --basic-stats oplog.tsv.zst
 |--------|-------------|
 | `<FILES>...` | Input files to process (TSV/CSV, optionally zstd compressed) |
 | `-s, --skip <TIME>` | Skip warmup time from start (e.g., "90s", "5m") |
+| `--per-client` | Generate per-client statistics (in addition to overall stats) |
 | `--basic-stats` | Show basic file info without full processing |
 | `-h, --help` | Display help information |
 | `-V, --version` | Display version information |

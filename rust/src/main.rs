@@ -61,6 +61,10 @@ struct Args {
     #[arg(required = true, action = ArgAction::Append)]
     files: Vec<String>,
 
+    /// Generate per-client statistics (in addition to overall stats)
+    #[arg(long)]
+    per_client: bool,
+
     /// Just print basic stats without full processing
     #[arg(long)]
     basic_stats: bool,
@@ -184,6 +188,7 @@ fn main() -> Result<()> {
             file_path, 
             skip_nanos,
             args.basic_stats,
+            args.per_client,
         )?;
 
         // Update global time range
@@ -229,7 +234,7 @@ fn main() -> Result<()> {
             let consolidated_df = concat_dataframes(&all_dataframes)?;
             
             // Compute and display consolidated stats
-            compute_and_display_stats(&consolidated_df, run_time_secs, "Consolidated Results:")?;
+            compute_and_display_stats(&consolidated_df, run_time_secs, "Consolidated Results:", args.per_client)?;
         } else {
             println!("No valid data to consolidate.");
         }
@@ -270,6 +275,7 @@ fn process_file(
     file_path: &str, 
     skip_nanos: Option<i64>,
     basic_stats_only: bool,
+    per_client: bool,
 ) -> Result<(DataFrame, Option<i64>, Option<i64>)> {
     // Read the file
     let mut df = read_tsv_file(file_path)?;
@@ -311,7 +317,7 @@ fn process_file(
     df = add_size_buckets(df)?;
 
     // Compute and display statistics
-    compute_and_display_stats(&df, run_time_secs, "")?;
+    compute_and_display_stats(&df, run_time_secs, "", per_client)?;
 
     Ok((df, Some(effective_start_ns), Some(end_ns)))
 }
@@ -499,7 +505,7 @@ fn add_size_buckets(df: DataFrame) -> Result<DataFrame> {
 }
 
 /// Compute and display performance statistics
-fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str) -> Result<()> {
+fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str, per_client: bool) -> Result<()> {
     // Group by operation and bucket, compute statistics
     let stats = df.clone().lazy()
         .group_by([col("op"), col("bytes_bucket"), col("bucket_num")])
@@ -603,6 +609,173 @@ fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str) ->
              format_int_with_commas(total_ops as i64),
              total_ops_sec);
 
+    // Print per-client statistics if requested
+    if per_client {
+        compute_and_print_per_client_stats(df, run_time_secs)?;
+    }
+
+    Ok(())
+}
+
+/// Compute and print per-client statistics to show variation across clients
+fn compute_and_print_per_client_stats(df: &DataFrame, run_time_secs: f64) -> Result<()> {
+    // Check if client_id column exists
+    if df.column("client_id").is_err() {
+        println!("\nWarning: client_id column not found, skipping per-client statistics.");
+        return Ok(());
+    }
+
+    // Get unique client_ids
+    let unique_clients = df.column("client_id")?
+        .unique()?;
+    let client_ids = unique_clients
+        .str()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    
+    if client_ids.len() <= 1 {
+        println!("\nOnly one client detected, skipping per-client statistics.");
+        return Ok(());
+    }
+    
+    println!("\n{}", "=".repeat(80));
+    println!("Per-Client Statistics ({} clients detected)", client_ids.len());
+    println!("{}", "=".repeat(80));
+    
+    // Compute overall stats per client
+    let client_stats = df.clone().lazy()
+        .group_by([col("client_id")])
+        .agg([
+            (col("duration_ns").mean() / lit(1000.0)).alias("mean_lat_us"),
+            (col("duration_ns").median() / lit(1000.0)).alias("med_lat_us"),
+            (col("duration_ns").quantile(lit(0.90), QuantileMethod::Linear) / lit(1000.0)).alias("p90_lat_us"),
+            (col("duration_ns").quantile(lit(0.95), QuantileMethod::Linear) / lit(1000.0)).alias("p95_lat_us"),
+            (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99_lat_us"),
+            (col("duration_ns").max() / lit(1000.0)).alias("max_lat_us"),
+            (col("bytes").mean() / lit(1024.0)).alias("avg_obj_KB"),
+            (col("op").count().cast(DataType::Float64) / lit(run_time_secs)).alias("ops_per_sec"),
+            ((col("bytes").sum().cast(DataType::Float64) / lit(1024.0 * 1024.0)) / lit(run_time_secs)).alias("xput_MBps"),
+            col("op").count().alias("count"),
+        ])
+        .sort(["client_id"], SortMultipleOptions::default())
+        .collect()?;
+    
+    // Print header
+    println!("{:>15} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
+             "client_id", "mean_lat_us", "med._lat_us", "90%_lat_us", "95%_lat_us", 
+             "99%_lat_us", "max_lat_us", "avg_obj_KB", "ops_/_sec", "xput_MBps", "count");
+    
+    // Print each client
+    let client_col = client_stats.column("client_id")?.str()?;
+    let mean_lat = client_stats.column("mean_lat_us")?.f64()?;
+    let med_lat = client_stats.column("med_lat_us")?.f64()?;
+    let p90_lat = client_stats.column("p90_lat_us")?.f64()?;
+    let p95_lat = client_stats.column("p95_lat_us")?.f64()?;
+    let p99_lat = client_stats.column("p99_lat_us")?.f64()?;
+    let max_lat = client_stats.column("max_lat_us")?.f64()?;
+    let avg_kb = client_stats.column("avg_obj_KB")?.f64()?;
+    let ops_sec = client_stats.column("ops_per_sec")?.f64()?;
+    let xput = client_stats.column("xput_MBps")?.f64()?;
+    let count_col = client_stats.column("count")?.u32()?;
+    
+    for i in 0..client_stats.height() {
+        let client = client_col.get(i).unwrap_or("?");
+        let mean = mean_lat.get(i).unwrap_or(0.0);
+        let med = med_lat.get(i).unwrap_or(0.0);
+        let p90 = p90_lat.get(i).unwrap_or(0.0);
+        let p95 = p95_lat.get(i).unwrap_or(0.0);
+        let p99 = p99_lat.get(i).unwrap_or(0.0);
+        let max = max_lat.get(i).unwrap_or(0.0);
+        let avg = avg_kb.get(i).unwrap_or(0.0);
+        let ops = ops_sec.get(i).unwrap_or(0.0);
+        let xp = xput.get(i).unwrap_or(0.0);
+        let cnt = count_col.get(i).unwrap_or(0);
+        
+        println!("{:>15} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
+                 client,
+                 format_with_commas(mean),
+                 format_with_commas(med),
+                 format_with_commas(p90),
+                 format_with_commas(p95),
+                 format_with_commas(p99),
+                 format_with_commas(max),
+                 format_with_commas(avg),
+                 format_with_commas(ops),
+                 format_with_commas(xp),
+                 format_int_with_commas(cnt as i64));
+    }
+    
+    // Print per-client stats by operation type
+    println!("\nPer-Client Statistics by Operation Type:");
+    println!("{}", "-".repeat(80));
+    
+    // Define operation categories
+    let categories = vec![
+        ("META", META_OPS.to_vec()),
+        ("GET", vec!["GET"]),
+        ("PUT", vec!["PUT"]),
+    ];
+    
+    for (op_name, ops_list) in categories {
+        // Build filter for this operation category
+        let mut filter_expr = lit(false);
+        for op in &ops_list {
+            filter_expr = filter_expr.or(col("op").eq(lit(*op)));
+        }
+        
+        let op_client_stats = df.clone().lazy()
+            .filter(filter_expr)
+            .group_by([col("client_id")])
+            .agg([
+                (col("duration_ns").mean() / lit(1000.0)).alias("mean_lat_us"),
+                (col("duration_ns").median() / lit(1000.0)).alias("med_lat_us"),
+                (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99_lat_us"),
+                (col("op").count().cast(DataType::Float64) / lit(run_time_secs)).alias("ops_per_sec"),
+                ((col("bytes").sum().cast(DataType::Float64) / lit(1024.0 * 1024.0)) / lit(run_time_secs)).alias("xput_MBps"),
+                col("op").count().alias("count"),
+            ])
+            .sort(["client_id"], SortMultipleOptions::default())
+            .collect()?;
+        
+        if op_client_stats.height() == 0 {
+            continue;
+        }
+        
+        println!("\n{} Operations:", op_name);
+        println!("{:>15} {:>11} {:>11} {:>10} {:>9} {:>9} {:>9}",
+                 "client_id", "mean_lat_us", "med._lat_us", "99%_lat_us", "ops_/_sec", "xput_MBps", "count");
+        
+        let client_col = op_client_stats.column("client_id")?.str()?;
+        let mean_lat = op_client_stats.column("mean_lat_us")?.f64()?;
+        let med_lat = op_client_stats.column("med_lat_us")?.f64()?;
+        let p99_lat = op_client_stats.column("p99_lat_us")?.f64()?;
+        let ops_sec = op_client_stats.column("ops_per_sec")?.f64()?;
+        let xput = op_client_stats.column("xput_MBps")?.f64()?;
+        let count_col = op_client_stats.column("count")?.u32()?;
+        
+        for i in 0..op_client_stats.height() {
+            let client = client_col.get(i).unwrap_or("?");
+            let mean = mean_lat.get(i).unwrap_or(0.0);
+            let med = med_lat.get(i).unwrap_or(0.0);
+            let p99 = p99_lat.get(i).unwrap_or(0.0);
+            let ops = ops_sec.get(i).unwrap_or(0.0);
+            let xp = xput.get(i).unwrap_or(0.0);
+            let cnt = count_col.get(i).unwrap_or(0);
+            
+            println!("{:>15} {:>11} {:>11} {:>10} {:>9} {:>9} {:>9}",
+                     client,
+                     format_with_commas(mean),
+                     format_with_commas(med),
+                     format_with_commas(p99),
+                     format_with_commas(ops),
+                     format_with_commas(xp),
+                     format_int_with_commas(cnt as i64));
+        }
+    }
+    
+    println!("\n{}\n", "=".repeat(80));
+    
     Ok(())
 }
 

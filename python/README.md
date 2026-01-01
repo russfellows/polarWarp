@@ -39,6 +39,9 @@ uv run ./polarwarp.py agent-1.csv.zst agent-2.csv.zst
 
 # Skip first 2 minutes of warmup
 uv run ./polarwarp.py --skip=2m oplog.csv.zst
+
+# Compare performance across multiple clients
+uv run ./polarwarp.py --per-client multi_client_oplog.csv.zst
 ```
 
 ## Command Line Options
@@ -47,6 +50,7 @@ uv run ./polarwarp.py --skip=2m oplog.csv.zst
 |--------|-------------|
 | `<FILES>...` | Input files to process (CSV/TSV, optionally zstd compressed) |
 | `--skip=<TIME>` | Skip warmup time from start (e.g., "90s", "5m") |
+| `--per-client` | Generate per-client statistics (in addition to overall stats) |
 | `--help` | Display help information |
 
 ## Performance

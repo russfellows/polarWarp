@@ -45,6 +45,85 @@ def format_with_commas(value):
     return value  # Return the value unchanged if it's not numeric
 
 
+def compute_per_client_stats(df, run_time_secs):
+    """
+    Compute statistics grouped by client_id to show variation across clients.
+    Returns a DataFrame with per-client summary statistics.
+    """
+    # Get unique clients
+    clients = df.select(pl.col("client_id").unique()).to_series().to_list()
+    
+    if len(clients) <= 1:
+        print("\nOnly one client detected, skipping per-client statistics.")
+        return None
+    
+    print(f"\n{'='*80}")
+    print(f"Per-Client Statistics ({len(clients)} clients detected)")
+    print(f"{'='*80}")
+    
+    # Compute stats for each client
+    client_stats = df.group_by(["client_id"]).agg([
+        (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
+        (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
+        (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
+        (pl.col("duration_ns").quantile(0.95) / 1000).alias("95%_lat_us"),
+        (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
+        (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
+        (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
+        (pl.count("op") / run_time_secs).alias("ops_/_sec"),
+        ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias("xput_MBps"),
+        pl.count("op").alias("count"),
+    ]).sort("client_id")
+    
+    # Convert to pandas for pretty printing
+    client_stats_pd = client_stats.to_pandas()
+    
+    columns_to_format = [
+        "mean_lat_us", "med._lat_us", "90%_lat_us", "95%_lat_us", "99%_lat_us", 
+        "max_lat_us", "avg_obj_KB", "ops_/_sec", "xput_MBps", "count"
+    ]
+    
+    for column in columns_to_format:
+        if column in client_stats_pd:
+            client_stats_pd[column] = client_stats_pd[column].map(format_with_commas)
+    
+    print(client_stats_pd.to_string(index=False))
+    
+    # Also compute per-client stats for each operation type
+    print(f"\nPer-Client Statistics by Operation Type:")
+    print(f"{'-'*80}")
+    
+    for op_type in ["META", "GET", "PUT"]:
+        if op_type == "META":
+            op_df = df.filter(pl.col("op").is_in(META_OPS))
+        else:
+            op_df = df.filter(pl.col("op") == op_type)
+        
+        if op_df.height == 0:
+            continue
+        
+        op_client_stats = op_df.group_by(["client_id"]).agg([
+            (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
+            (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
+            (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
+            (pl.count("op") / run_time_secs).alias("ops_/_sec"),
+            ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias("xput_MBps"),
+            pl.count("op").alias("count"),
+        ]).sort("client_id")
+        
+        op_client_stats_pd = op_client_stats.to_pandas()
+        
+        for column in ["mean_lat_us", "med._lat_us", "99%_lat_us", "ops_/_sec", "xput_MBps", "count"]:
+            if column in op_client_stats_pd:
+                op_client_stats_pd[column] = op_client_stats_pd[column].map(format_with_commas)
+        
+        print(f"\n{op_type} Operations:")
+        print(op_client_stats_pd.to_string(index=False))
+    
+    print(f"\n{'='*80}\n")
+    return client_stats
+
+
 def compute_summary_rows(df, run_time_secs):
     """
     Compute summary rows for operation categories (META, GET, PUT).
@@ -124,6 +203,7 @@ def print_usage():
     print(f"  --skip=<time>  Skip specified time from start of each file")
     print(f"                 Format: <number>s (seconds) or <number>m (minutes)")
     print(f"                 Example: --skip=90s or --skip=5m")
+    print(f"  --per-client   Generate per-client statistics (in addition to overall stats)")
     print(f"  --help         Show this help message and exit")
     print(f"\nArguments:")
     print(f"  file1 file2... One or more oplog files to process (TSV/CSV, optionally .zst compressed)")
@@ -146,6 +226,7 @@ if "--help" in sys.argv or "-h" in sys.argv:
 
 # Process the --skip argument
 skip_time = None
+per_client_stats = False
 file_paths = []
 skip_pattern = re.compile(r"^--skip=(\d+)([sm])$")
 
@@ -153,22 +234,26 @@ skip_pattern = re.compile(r"^--skip=(\d+)([sm])$")
 for arg in sys.argv[1:]:
     if arg.startswith("--"):
         # This is an option
-        match = skip_pattern.match(arg)
-        if match:
-            value, unit = match.groups()
-            try:
-                value = int(value)
-                if value <= 0:
-                    print_error(f"Skip value must be positive, got: {value}")
-                if unit == "s":
-                    skip_time = timedelta(seconds=value)
-                elif unit == "m":
-                    skip_time = timedelta(minutes=value)
-                print(f"Using skip value of {skip_time}")
-            except ValueError as e:
-                print_error(f"Invalid skip value: {e}")
+        if arg == "--per-client":
+            per_client_stats = True
+            print("Per-client statistics enabled")
         else:
-            print_error(f"Unknown option: {arg}\nValid options: --skip=<time>, --help")
+            match = skip_pattern.match(arg)
+            if match:
+                value, unit = match.groups()
+                try:
+                    value = int(value)
+                    if value <= 0:
+                        print_error(f"Skip value must be positive, got: {value}")
+                    if unit == "s":
+                        skip_time = timedelta(seconds=value)
+                    elif unit == "m":
+                        skip_time = timedelta(minutes=value)
+                    print(f"Using skip value of {skip_time}")
+                except ValueError as e:
+                    print_error(f"Invalid skip value: {e}")
+            else:
+                print_error(f"Unknown option: {arg}\nValid options: --skip=<time>, --per-client, --help")
     else:
         # This is a file path
         file_paths.append(arg)
@@ -363,6 +448,10 @@ for file_path in file_paths:
     summary_rows = compute_summary_rows(df, run_time_secs)
     print_summary_rows(summary_rows, columns_to_format)
 
+    # Print per-client statistics if requested
+    if per_client_stats:
+        compute_per_client_stats(df, run_time_secs)
+
     # Print processing time (matching Rust output)
     process_elapsed = time.time() - process_start
     print(f"\nProcessed in {process_elapsed:.2f} seconds")
@@ -454,3 +543,7 @@ print(consolidated_stats_pd)
 # Print summary rows for consolidated results (with statistically valid percentiles)
 summary_rows = compute_summary_rows(consolidated_df, consolidated_run_secs)
 print_summary_rows(summary_rows, columns_to_format)
+
+# Print per-client statistics for consolidated data if requested
+if per_client_stats:
+    compute_per_client_stats(consolidated_df, consolidated_run_secs)

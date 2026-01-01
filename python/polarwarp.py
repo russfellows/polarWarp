@@ -117,47 +117,72 @@ def print_summary_rows(summary_rows, columns_to_format):
 
 script_name = sys.argv[0]
 
+def print_usage():
+    """Print usage information."""
+    print(f"Usage: python {script_name} [OPTIONS] <file1> [file2 ...]")
+    print(f"\nOptions:")
+    print(f"  --skip=<time>  Skip specified time from start of each file")
+    print(f"                 Format: <number>s (seconds) or <number>m (minutes)")
+    print(f"                 Example: --skip=90s or --skip=5m")
+    print(f"  --help         Show this help message and exit")
+    print(f"\nArguments:")
+    print(f"  file1 file2... One or more oplog files to process (TSV/CSV, optionally .zst compressed)")
+
+def print_error(message):
+    """Print error message and exit."""
+    print(f"Error: {message}", file=sys.stderr)
+    print(f"Run '{script_name} --help' for usage information.", file=sys.stderr)
+    sys.exit(1)
+
 # Check command line args, give basic usage
 if len(sys.argv) < 2:
-    print(f"Usage: python {script_name} [--help] : Prints this message and exits")
-    print(f"Usage: python {script_name} [--skip=<time_to_skip>] <file1> <file2> ...")
+    print_usage()
     sys.exit(1)
+
+# Process --help flag first
+if "--help" in sys.argv or "-h" in sys.argv:
+    print_usage()
+    sys.exit(0)
 
 # Process the --skip argument
 skip_time = None
 file_paths = []
-skip_pattern = re.compile(r"--skip=(\d+)([sm])")
-
-# Process --help flag
-if "--help" in sys.argv:
-    print(f"""
-Usage: python {script_name} [--skip=<time_to_skip>] <file1> <file2> ...
-
-Options:
-  --skip=<time_to_skip>  Skip a specified amount of time from the start of each file. 
-                         Example: --skip=90s (90 seconds) or --skip=5m (5 minutes).
-  --help                 Show this help message and exit.
-""")
-    sys.exit(0)
+skip_pattern = re.compile(r"^--skip=(\d+)([sm])$")
 
 # Now process remaining arguments
 for arg in sys.argv[1:]:
-
-    match = skip_pattern.match(arg)
-    if match:
-        value, unit = match.groups()
-        value = int(value)
-        if unit == "s":
-            skip_time = timedelta(seconds=value)
-        elif unit == "m":
-            skip_time = timedelta(minutes=value)
-        print(f"Using skip value of {skip_time}")
+    if arg.startswith("--"):
+        # This is an option
+        match = skip_pattern.match(arg)
+        if match:
+            value, unit = match.groups()
+            try:
+                value = int(value)
+                if value <= 0:
+                    print_error(f"Skip value must be positive, got: {value}")
+                if unit == "s":
+                    skip_time = timedelta(seconds=value)
+                elif unit == "m":
+                    skip_time = timedelta(minutes=value)
+                print(f"Using skip value of {skip_time}")
+            except ValueError as e:
+                print_error(f"Invalid skip value: {e}")
+        else:
+            print_error(f"Unknown option: {arg}\nValid options: --skip=<time>, --help")
     else:
+        # This is a file path
         file_paths.append(arg)
 
 if not file_paths:
-    print("Error: No input files provided.")
-    sys.exit(1)
+    print_error("No input files provided")
+
+# Validate that files exist
+import os
+for file_path in file_paths:
+    if not os.path.exists(file_path):
+        print_error(f"File not found: {file_path}")
+    if not os.path.isfile(file_path):
+        print_error(f"Not a file: {file_path}")
 
 # Create empty dataFrame for consolidate results
 consolidated_df = pl.DataFrame()
@@ -172,35 +197,60 @@ global_end = None
 # Primary loop, process each file
 #
 for file_path in file_paths:
-    print(f"\nProcessing file: {file_path}")
-    process_start = time.time()
-    df = pl.read_csv(file_path, ignore_errors=True, separator='\t')
+    try:
+        print(f"\nProcessing file: {file_path}")
+        process_start = time.time()
+        
+        # Try to read the file with error handling
+        try:
+            df = pl.read_csv(file_path, ignore_errors=True, separator='\t')
+        except Exception as e:
+            print_error(f"Failed to read file '{file_path}': {e}")
+        
+        # Check if dataframe is empty
+        if df.is_empty():
+            print_error(f"File '{file_path}' contains no data")
+        
+        # Check for required columns
+        required_columns = ["start", "end", "op", "bytes", "duration_ns"]
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            print_error(f"File '{file_path}' is missing required columns: {', '.join(missing_columns)}")
 
-    # Note: parsing the ISO 8601 time is a bit tricky.  If the value ends in a literal capital "Z", then it may cause problems.  
-    df = df.with_columns([
-        pl.col("start").str.replace("Z$", "+00:00").str.strptime(pl.Datetime, "%Y-%m-%dT%H:%M:%S%.f%z", strict=False).alias("start"),
-        pl.col("end").str.replace("Z$", "+00:00").str.strptime(pl.Datetime, "%Y-%m-%dT%H:%M:%S%.f%z", strict=False).alias("end"),
-    ])
+        # Note: parsing the ISO 8601 time is a bit tricky.  If the value ends in a literal capital "Z", then it may cause problems.  
+        try:
+            df = df.with_columns([
+                pl.col("start").str.replace("Z$", "+00:00").str.strptime(pl.Datetime, "%Y-%m-%dT%H:%M:%S%.f%z", strict=False).alias("start"),
+                pl.col("end").str.replace("Z$", "+00:00").str.strptime(pl.Datetime, "%Y-%m-%dT%H:%M:%S%.f%z", strict=False).alias("end"),
+            ])
+        except Exception as e:
+            print_error(f"Failed to parse timestamps in file '{file_path}': {e}")
 
-    start_time = None
-    start_values_checked = []
-    for value in df.select(pl.col("start").drop_nulls()).to_series():
-        start_values_checked.append(value)
-        if value is not None:
-            start_time = value
-            break
+        start_time = None
+        start_values_checked = []
+        for value in df.select(pl.col("start").drop_nulls()).to_series():
+            start_values_checked.append(value)
+            if value is not None:
+                start_time = value
+                break
 
-    end_time = None
-    end_values_checked = []
-    for value in reversed(df.select(pl.col("end").drop_nulls()).to_series()):
-        end_values_checked.append(value)
-        if value is not None:
-            end_time = value
-            break
+        end_time = None
+        end_values_checked = []
+        for value in reversed(df.select(pl.col("end").drop_nulls()).to_series()):
+            end_values_checked.append(value)
+            if value is not None:
+                end_time = value
+                break
 
-    # If this error is raised, likey a time parsing issue, see code block up 30 lines and ISO 8601 parsing, particularly the TZ
-    if start_time is None or end_time is None:
-        raise ValueError("Start time or end time could not be determined. Check input data, it may be a timezone issue, is there a <Z> at the end?")
+        # If this error is raised, likely a time parsing issue
+        if start_time is None or end_time is None:
+            print_error(f"Could not determine start/end time in file '{file_path}'. Check timestamp format (ISO 8601 expected)")
+    
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user", file=sys.stderr)
+        sys.exit(130)
+    except Exception as e:
+        print_error(f"Unexpected error processing file '{file_path}': {e}")
 
     if global_start is None or global_end is None:
         if skip_time is not None:

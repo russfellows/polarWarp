@@ -92,33 +92,48 @@ fn detect_separator(file_path: &str) -> Result<u8> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
     
-    let file = File::open(file_path)?;
+    let file = File::open(file_path)
+        .with_context(|| format!("Failed to open file: {}", file_path))?;
     
     // Handle zstd compressed files
     let first_line = if file_path.ends_with(".zst") {
-        let decoder = zstd::stream::read::Decoder::new(file)?;
+        let decoder = zstd::stream::read::Decoder::new(file)
+            .with_context(|| format!("Failed to decompress zstd file: {}", file_path))?;
         let mut reader = BufReader::new(decoder);
         let mut line = String::new();
-        reader.read_line(&mut line)?;
+        reader.read_line(&mut line)
+            .with_context(|| format!("Failed to read header from compressed file: {}", file_path))?;
         line
     } else {
         let mut reader = BufReader::new(file);
         let mut line = String::new();
-        reader.read_line(&mut line)?;
+        reader.read_line(&mut line)
+            .with_context(|| format!("Failed to read header from file: {}", file_path))?;
         line
     };
+    
+    if first_line.is_empty() {
+        anyhow::bail!("File '{}' is empty or has no header", file_path);
+    }
     
     // Count tabs vs commas in header line
     let tab_count = first_line.matches('\t').count();
     let comma_count = first_line.matches(',').count();
     
     // Use whichever delimiter appears more often
-    // This handles cases where .csv files are actually tab-separated (like warp output)
+    // Note: warp program creates .csv files that are actually tab-separated!
     if tab_count > comma_count {
+        if file_path.contains(".csv") && tab_count > 0 {
+            eprintln!("Note: File has .csv extension but uses tab separation (typical for warp output)");
+        }
         Ok(b'\t')
     } else if comma_count > 0 {
         Ok(b',')
     } else {
+        // No clear delimiter found, might be invalid format
+        if tab_count == 0 && comma_count == 0 {
+            eprintln!("Warning: No delimiter found in file '{}', defaulting to tab", file_path);
+        }
         Ok(b'\t')  // Default to tab
     }
 }
@@ -305,8 +320,18 @@ fn process_file(
 fn read_tsv_file(file_path: &str) -> Result<DataFrame> {
     let path = Path::new(file_path);
     
+    // Check if file exists
+    if !path.exists() {
+        anyhow::bail!("File not found: {}", file_path);
+    }
+    
+    if !path.is_file() {
+        anyhow::bail!("Not a file: {}", file_path);
+    }
+    
     // Detect separator by reading first line of the file
-    let separator = detect_separator(file_path)?;
+    let separator = detect_separator(file_path)
+        .with_context(|| format!("Failed to detect separator in file: {}", file_path))?;
 
     let parse_options = CsvParseOptions::default()
         .with_separator(separator)
@@ -322,7 +347,32 @@ fn read_tsv_file(file_path: &str) -> Result<DataFrame> {
     let df = read_options
         .try_into_reader_with_file_path(Some(path.to_path_buf()))?
         .finish()
-        .context("Failed to read TSV file")?;
+        .with_context(|| format!("Failed to read file '{}'. Ensure it's a valid CSV/TSV file", file_path))?;
+
+    // Validate the dataframe has data
+    if df.height() == 0 {
+        anyhow::bail!("File '{}' contains no data rows", file_path);
+    }
+    
+    // Validate required columns exist
+    let required_columns = ["start", "end", "op", "bytes", "duration_ns"];
+    let column_names: Vec<String> = df.get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    
+    let missing: Vec<&str> = required_columns.iter()
+        .filter(|col| !column_names.contains(&col.to_string()))
+        .copied()
+        .collect();
+    
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "File '{}' is missing required columns: {}",
+            file_path,
+            missing.join(", ")
+        );
+    }
 
     Ok(df)
 }
@@ -370,7 +420,8 @@ fn parse_timestamps(df: DataFrame) -> Result<DataFrame> {
             col("start_dt").dt().timestamp(TimeUnit::Nanoseconds).alias("start_ns"),
             col("end_dt").dt().timestamp(TimeUnit::Nanoseconds).alias("end_ns"),
         ])
-        .collect()?;
+        .collect()
+        .context("Failed to parse timestamps. Ensure timestamps are in ISO 8601 format (e.g., '2025-01-01T12:00:00Z')")?;
 
     Ok(result)
 }

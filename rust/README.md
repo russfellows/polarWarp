@@ -91,12 +91,12 @@ Matching sai3-bench bucket definitions:
 
 ### Speed Benchmarks
 
-| Build | Time per 230K records | Records/sec |
+| Build | Time per 1.16M records | Records/sec |
 |-------|----------------------|-------------|
-| Debug | ~2.5s | ~95,000 |
-| Release | ~300ms | ~780,000 |
+| Debug | ~5-6s | ~200,000 |
+| Release | ~1.11s | ~1,075,000 |
 
-The release build is approximately **8x faster** than debug, thanks to:
+The release build is approximately **5x faster** than debug, thanks to:
 - Link-Time Optimization (LTO)
 - Single codegen unit
 - Maximum optimization level (opt-level = 3)
@@ -105,10 +105,10 @@ The release build is approximately **8x faster** than debug, thanks to:
 
 | Metric | Value |
 |--------|-------|
-| **Wall clock time** | 2.88 seconds |
-| **CPU utilization** | 263% (~3 cores) |
-| **Records/sec** | ~807,000 |
-| **Peak memory (RSS)** | 1,257 MB |
+| **Wall clock time** | 2.36 seconds |
+| **CPU utilization** | ~280% (~3 cores) |
+| **Records/sec** | ~1,075,000 |
+| **Peak memory (RSS)** | ~1,200 MB |
 | **Page swaps** | 0 |
 | **Major page faults** | 0 |
 

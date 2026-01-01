@@ -23,34 +23,37 @@ PolarWarp is available in two implementations with identical functionality and o
 
 | Implementation | Speed | Best For |
 |----------------|-------|----------|
-| [**Rust**](rust/) | ~870K records/sec | Production use, large files, compiled binary |
-| [**Python**](python/) | ~850K records/sec | Quick analysis, scripting, no compilation |
+| [**Rust**](rust/) | ~1,075K records/sec | Production use, large files, compiled binary |
+| [**Python**](python/) | ~558K records/sec | Quick analysis, scripting, no compilation |
+
+**Performance notes:** Rust is **2.3× faster** than Python, and both are significantly faster than MinIO warp.
 
 ### Performance Comparison
 
-Benchmark results processing a 1.16M operation mixed workload log (zstd compressed):
+Benchmark results processing 2.32M operations (2 × 1.16M files, zstd compressed) on the same machine:
 
 | Tool | Time | Speedup |
 |------|------|--------|
-| **PolarWarp (Rust)** | 1.34s | **8.4x faster** |
-| **PolarWarp (Python)** | 1.36s | **8.2x faster** |
-| MinIO `warp analyze` | 11.19s | baseline |
+| **PolarWarp (Rust)** | 2.36s | **14.4x faster** |
+| **PolarWarp (Python)** | 5.48s | **6.2x faster** |
+| MinIO `warp merge + analyze` | 34.0s | baseline |
 
-Both PolarWarp implementations provide **8x faster** analysis than MinIO's native `warp analyze` tool, while also providing more detailed per-bucket latency breakdowns.
+Both PolarWarp implementations provide significantly faster analysis than MinIO's native `warp` tool.
 
 ### Multi-File Consolidation Performance
 
 When analyzing multiple files (2 × 1.16M operations = 2.32M total), PolarWarp handles consolidation in a single command, while MinIO warp requires separate merge and analyze steps:
 
-| Tool | Wall Time | Peak Memory | Notes |
-|------|-----------|-------------|-------|
-| **PolarWarp (Python)** | 2.62s | 1.83 GB | Single command |
-| **PolarWarp (Rust)** | 3.03s | 1.20 GB | Single command |
-| MinIO `warp merge` | 13.18s | 1.77 GB | Step 1 of 2 |
-| MinIO `warp analyze` | 22.03s | 5.21 GB | Step 2 of 2 |
-| **warp total** | **35.21s** | **5.21 GB** | Two commands required |
+| Tool | Merge Time | Analyze Time | Total Time | Notes |
+|------|-----------|--------------|------------|-------|
+| **PolarWarp (Rust)** | — | — | **2.36s** | Single command |
+| **PolarWarp (Python)** | — | — | **5.48s** | Single command |
+| MinIO warp | 12.58s | 21.41s | **34.0s** | Two commands required |
 
-**Summary**: PolarWarp is **12x faster** and uses **3-4x less memory** than warp for multi-file analysis.
+**Summary:** 
+- PolarWarp Rust is **14.4× faster** than warp
+- PolarWarp Python is **6.2× faster** than warp
+- PolarWarp Rust is **2.3× faster** than Python
 
 ### Resource Scaling Analysis
 
@@ -58,8 +61,8 @@ Measured scaling factors (1 file → 2 files, each 1.16M operations):
 
 | Tool | Time Scaling | Memory Scaling | Memory per Op |
 |------|-------------|----------------|---------------|
-| **PolarWarp (Rust)** | 2.2x (linear) | 1.97x (linear) | 0.52 KB/op |
-| **PolarWarp (Python)** | 1.6x (sub-linear) | 1.54x (sub-linear) | 0.79 KB/op |
+| **PolarWarp (Rust)** | 2.1x (linear) | ~1.0x (constant) | 0.52 KB/op |
+| **PolarWarp (Python)** | 1.7x (sub-linear) | ~1.0x (constant) | 0.77 KB/op |
 | MinIO warp | 2.0x (linear) | 2.28x (**super-linear**) | 2.24 KB/op |
 
 ### Projected Resource Usage at Scale
@@ -68,16 +71,16 @@ Measured scaling factors (1 file → 2 files, each 1.16M operations):
 
 | Tool | Projected Time | Projected Memory |
 |------|---------------|------------------|
-| **PolarWarp (Rust)** | ~40s | ~16 GB |
-| **PolarWarp (Python)** | ~35s | ~18 GB |
+| **PolarWarp (Rust)** | ~30s | ~16 GB |
+| **PolarWarp (Python)** | ~70s | ~18 GB |
 | MinIO warp (merge+analyze) | ~7.5 min | ~67 GB |
 
 **Large scale: 8 × 15M operations (120M total)**
 
 | Tool | Projected Time | Projected Memory | Feasibility |
 |------|---------------|------------------|-------------|
-| **PolarWarp (Rust)** | ~2.5 min | ~62 GB | ✅ Fits in 64 GB workstation |
-| **PolarWarp (Python)** | ~2.3 min | ~72 GB | ⚠️ Needs 128 GB or swap |
+| **PolarWarp (Rust)** | ~2 min | ~64 GB | ✅ Fits in 64 GB workstation |
+| **PolarWarp (Python)** | ~4.5 min | ~72 GB | ⚠️ Needs 128 GB or swap |
 | MinIO warp | ~30 min | **~270 GB** | ❌ Impractical |
 
 *Projections based on measured scaling factors. warp's super-linear memory growth (2.28x per 2x data) makes it impractical for large-scale analysis, while PolarWarp's linear scaling remains manageable.*

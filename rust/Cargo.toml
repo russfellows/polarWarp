@@ -1,7 +1,7 @@
 [package]
 name = "polarwarp-rs"
 version = "0.1.2"
-edition = "2024"
+edition = "2021"
 authors = ["Russ Fellows <russ.fellows@gmail.com>"]
 description = "A Rust implementation of polarWarp for processing oplog files"
 readme = "README.md"
@@ -10,7 +10,7 @@ license = "Apache-2.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-polars = { version = "0.46.0", features = ["csv", "decompress", "lazy", "dtype-datetime", "strings", "temporal", "describe", "ndarray", "zip_with", "performant", "regex"] }
+polars = { version = "0.52.0", features = ["csv", "decompress", "lazy", "dtype-datetime", "strings", "temporal", "timezones", "describe", "ndarray", "zip_with", "performant", "regex"] }
 chrono = "0.4.42"
 clap = { version = "4.5.53", features = ["derive"] }
 csv = "1.4.0"

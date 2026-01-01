@@ -1,8 +1,12 @@
-numpy==2.2.2
-pandas==2.2.3
-polars==1.21.0
-pyarrow==19.0.0
-python-dateutil==2.9.0.post0
-pytz==2024.2
-six==1.17.0
-tzdata==2025.1
+Package           Version     Editable project location
+----------------- ----------- ------------------------------------------
+numpy             2.3.5
+pandas            2.3.3
+polars            1.35.2
+polars-runtime-32 1.35.2
+polars-warp       0.1.1       /home/eval/Documents/Code/polarWarp/python
+pyarrow           22.0.0
+python-dateutil   2.9.0.post0
+pytz              2025.2
+six               1.17.0
+tzdata            2025.2

@@ -6,6 +6,31 @@ Both implementations (Rust `polarwarp-rs` and Python `polars-warp`) track the sa
 
 ---
 
+## [0.1.6] - 2026-02-24
+
+### Bug Fixes
+
+- **#17 Overlap-aware multi-file consolidation** — When processing multiple oplog files, PolarWarp previously concatenated all rows regardless of whether the files' time ranges actually overlapped. This produced incorrect consolidated throughput and operation counts for sequential or partially overlapping test runs.
+
+  The fix computes the **Jaccard overlap** (`overlap_duration / union_duration`) across all files and applies one of three strategies:
+
+  | Jaccard | Behavior |
+  |---------|----------|
+  | < 3% | Files treated as **sequential runs** — consolidation is skipped and a warning is printed. Per-file results are still valid. |
+  | 3–97% | **Partial overlap** — a warning is printed showing the exact Jaccard %, each file's data is filtered to the intersection window, then consolidated. |
+  | ≥ 97% | **Fully concurrent** — data is filtered to the intersection window and consolidated without a warning. |
+
+  In all non-sequential cases each file's rows are filtered to `start ∈ [overlap_start, overlap_end)` before concatenation, so counts and throughput are computed over a consistent time slice across files.
+
+  **Also fixed (Python):** per-file `run_time_secs` was incorrectly using the running global overlap start instead of each file's own effective start time, causing subtly wrong per-file throughput when file start times differed.
+
+### Notes
+
+- Overlap thresholds (`OVERLAP_MIN_PCT = 3.0`, `OVERLAP_MAX_PCT = 97.0`) are defined as named constants near the top of both implementations and can be adjusted if needed.
+- Each file's individual time range and duration is now printed during multi-file runs for transparency.
+
+---
+
 ## [0.1.5] - 2025-01-23
 
 ### Bug Fixes

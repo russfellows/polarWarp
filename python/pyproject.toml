@@ -1,7 +1,7 @@
 [project]
-name = "polars-warp"
-version = "0.1.5"
-description = "Add your description"
+name = "polarwarp"
+version = "0.1.6"
+description = "A Python implementation of polarWarp for processing warp output and s3dlio / sai3-bench oplog files"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

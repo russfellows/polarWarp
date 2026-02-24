@@ -1,6 +1,6 @@
 # PolarWarp
 
-[![Version](https://img.shields.io/badge/version-0.1.5-brightgreen.svg)](https://github.com/russfellows/polarWarp/releases)
+[![Version](https://img.shields.io/badge/version-0.1.6-brightgreen.svg)](https://github.com/russfellows/polarWarp/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](python/)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](rust/)
@@ -17,7 +17,7 @@ High-performance tool for analyzing storage I/O operation logs (oplog files from
 - **Excel export**: Export results to a formatted `.xlsx` workbook with `--excel` option
 - **Latency percentiles**: mean, median, p90, p95, p99, max (statistically valid)
 - **Throughput metrics**: ops/sec and MiB/sec per bucket
-- **Multi-file consolidation**: Combine results from multiple agents
+- **Multi-file consolidation**: Combine results from multiple agents, with automatic overlap detection — sequential runs are flagged and skipped, partial overlaps are warned and trimmed to the intersection window
 - **Time skip**: Exclude warmup periods with `--skip` option
 
 ## Implementations

@@ -65,6 +65,10 @@ struct Args {
     #[arg(long)]
     per_client: bool,
 
+    /// Generate per-endpoint statistics (in addition to overall stats)
+    #[arg(long)]
+    per_endpoint: bool,
+
     /// Just print basic stats without full processing
     #[arg(long)]
     basic_stats: bool,
@@ -189,6 +193,7 @@ fn main() -> Result<()> {
             skip_nanos,
             args.basic_stats,
             args.per_client,
+            args.per_endpoint,
         )?;
 
         // Update global time range
@@ -234,7 +239,7 @@ fn main() -> Result<()> {
             let consolidated_df = concat_dataframes(&all_dataframes)?;
             
             // Compute and display consolidated stats
-            compute_and_display_stats(&consolidated_df, run_time_secs, "Consolidated Results:", args.per_client)?;
+            compute_and_display_stats(&consolidated_df, run_time_secs, "Consolidated Results:", args.per_client, args.per_endpoint)?;
         } else {
             println!("No valid data to consolidate.");
         }
@@ -276,6 +281,7 @@ fn process_file(
     skip_nanos: Option<i64>,
     basic_stats_only: bool,
     per_client: bool,
+    per_endpoint: bool,
 ) -> Result<(DataFrame, Option<i64>, Option<i64>)> {
     // Read the file
     let mut df = read_tsv_file(file_path)?;
@@ -317,7 +323,7 @@ fn process_file(
     df = add_size_buckets(df)?;
 
     // Compute and display statistics
-    compute_and_display_stats(&df, run_time_secs, "", per_client)?;
+    compute_and_display_stats(&df, run_time_secs, "", per_client, per_endpoint)?;
 
     Ok((df, Some(effective_start_ns), Some(end_ns)))
 }
@@ -504,26 +510,79 @@ fn add_size_buckets(df: DataFrame) -> Result<DataFrame> {
     Ok(result)
 }
 
+/// Compute the effective run time in seconds for a specific set of operations.
+/// Uses min(start_ns) to max(end_ns) for that operation subset, which correctly
+/// handles non-overlapping workloads (e.g., sequential PUT then GET phases).
+/// Returns 0.0 if no matching operations are found.
+fn compute_op_run_time(df: &DataFrame, ops: &[&str]) -> Result<f64> {
+    let mut filter_expr = lit(false);
+    for op in ops {
+        filter_expr = filter_expr.or(col("op").eq(lit(*op)));
+    }
+
+    let filtered = df.clone().lazy()
+        .filter(filter_expr)
+        .select([
+            col("start_ns").min().alias("min_start"),
+            col("end_ns").max().alias("max_end"),
+        ])
+        .collect()?;
+
+    if filtered.height() == 0 {
+        return Ok(0.0);
+    }
+
+    let min_start = filtered.column("min_start")?.i64()?.get(0);
+    let max_end   = filtered.column("max_end")?.i64()?.get(0);
+
+    match (min_start, max_end) {
+        (Some(s), Some(e)) if e > s => Ok((e - s) as f64 / 1_000_000_000.0),
+        _ => Ok(0.0),
+    }
+}
+
 /// Compute and display performance statistics
-fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str, per_client: bool) -> Result<()> {
-    // Group by operation and bucket, compute statistics
+fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str, per_client: bool, per_endpoint: bool) -> Result<()> {
+    // Pre-compute per-operation time ranges to correctly handle non-overlapping workloads
+    // (e.g., when PUT and GET phases run sequentially, not concurrently - issue #14)
+    let meta_time = compute_op_run_time(df, &META_OPS).unwrap_or(run_time_secs);
+    let get_time  = compute_op_run_time(df, &["GET"]).unwrap_or(run_time_secs);
+    let put_time  = compute_op_run_time(df, &["PUT"]).unwrap_or(run_time_secs);
+
+    // Map op name to its effective run time (fall back to global if zero)
+    let op_eff_time = |op: &str| -> f64 {
+        let t = if META_OPS.contains(&op) { meta_time }
+                else if op == "GET"       { get_time }
+                else if op == "PUT"       { put_time }
+                else                      { run_time_secs };
+        if t > 0.0 { t } else { run_time_secs }
+    };
+
+    // Check if thread column exists for concurrency reporting (issue #16)
+    let has_thread = df.column("thread").is_ok();
+
+    // Build group_by aggregation expressions
+    let mut agg_exprs: Vec<Expr> = vec![
+        // Latency statistics (convert ns to µs)
+        (col("duration_ns").mean() / lit(1000.0)).alias("mean_lat_us"),
+        (col("duration_ns").median() / lit(1000.0)).alias("med_lat_us"),
+        (col("duration_ns").quantile(lit(0.90), QuantileMethod::Linear) / lit(1000.0)).alias("p90_lat_us"),
+        (col("duration_ns").quantile(lit(0.95), QuantileMethod::Linear) / lit(1000.0)).alias("p95_lat_us"),
+        (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99_lat_us"),
+        (col("duration_ns").max() / lit(1000.0)).alias("max_lat_us"),
+        // Size statistics
+        (col("bytes").mean() / lit(1024.0)).alias("avg_obj_KB"),
+        // Raw count and bytes_sum — rates computed per-row using per-op time
+        col("op").count().alias("count"),
+        col("bytes").sum().cast(DataType::Float64).alias("bytes_sum"),
+    ];
+    if has_thread {
+        agg_exprs.push(col("thread").n_unique().alias("concurrency"));
+    }
+
     let stats = df.clone().lazy()
         .group_by([col("op"), col("bytes_bucket"), col("bucket_num")])
-        .agg([
-            // Latency statistics (convert ns to µs)
-            (col("duration_ns").mean() / lit(1000.0)).alias("mean_lat_us"),
-            (col("duration_ns").median() / lit(1000.0)).alias("med_lat_us"),
-            (col("duration_ns").quantile(lit(0.90), QuantileMethod::Linear) / lit(1000.0)).alias("p90_lat_us"),
-            (col("duration_ns").quantile(lit(0.95), QuantileMethod::Linear) / lit(1000.0)).alias("p95_lat_us"),
-            (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99_lat_us"),
-            (col("duration_ns").max() / lit(1000.0)).alias("max_lat_us"),
-            // Size statistics
-            (col("bytes").mean() / lit(1024.0)).alias("avg_obj_KB"),
-            // Throughput
-            (col("op").count().cast(DataType::Float64) / lit(run_time_secs)).alias("ops_per_sec"),
-            ((col("bytes").sum().cast(DataType::Float64) / lit(1024.0 * 1024.0)) / lit(run_time_secs)).alias("xput_MBps"),
-            col("op").count().alias("count"),
-        ])
+        .agg(agg_exprs)
         .sort(
             ["bucket_num", "op"],
             SortMultipleOptions::default(),
@@ -534,49 +593,56 @@ fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str, pe
     if !title.is_empty() {
         println!("\n{}", title);
     }
-    
-    // Print header (matching Python output format)
-    println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
-             "op", "bytes_bucket", "bucket_#", "mean_lat_us", "med._lat_us", "90%_lat_us", 
+
+    // Print header
+    println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
+             "op", "bytes_bucket", "bucket_#", "concurrency",
+             "mean_lat_us", "med._lat_us", "90%_lat_us",
              "95%_lat_us", "99%_lat_us", "max_lat_us", "avg_obj_KB", "ops_/_sec", "xput_MBps", "count");
 
-    // Print each row
-    let op_col = stats.column("op")?.str()?;
-    let bucket_col = stats.column("bytes_bucket")?.str()?;
+    // Extract columns
+    let op_col         = stats.column("op")?.str()?;
+    let bucket_col     = stats.column("bytes_bucket")?.str()?;
     let bucket_num_col = stats.column("bucket_num")?.i32()?;
-    let mean_lat = stats.column("mean_lat_us")?.f64()?;
-    let med_lat = stats.column("med_lat_us")?.f64()?;
-    let p90_lat = stats.column("p90_lat_us")?.f64()?;
-    let p95_lat = stats.column("p95_lat_us")?.f64()?;
-    let p99_lat = stats.column("p99_lat_us")?.f64()?;
-    let max_lat = stats.column("max_lat_us")?.f64()?;
-    let avg_kb = stats.column("avg_obj_KB")?.f64()?;
-    let ops_sec = stats.column("ops_per_sec")?.f64()?;
-    let xput = stats.column("xput_MBps")?.f64()?;
-    let count_col = stats.column("count")?.u32()?;
+    let mean_lat       = stats.column("mean_lat_us")?.f64()?;
+    let med_lat        = stats.column("med_lat_us")?.f64()?;
+    let p90_lat        = stats.column("p90_lat_us")?.f64()?;
+    let p95_lat        = stats.column("p95_lat_us")?.f64()?;
+    let p99_lat        = stats.column("p99_lat_us")?.f64()?;
+    let max_lat        = stats.column("max_lat_us")?.f64()?;
+    let avg_kb         = stats.column("avg_obj_KB")?.f64()?;
+    let count_col      = stats.column("count")?.u32()?;
+    let bytes_sum_col  = stats.column("bytes_sum")?.f64()?;
+    let concurrency_col = if has_thread { Some(stats.column("concurrency")?.u32()?) } else { None };
 
     for i in 0..stats.height() {
-        let op = op_col.get(i).unwrap_or("?");
-        let bucket = bucket_col.get(i).unwrap_or("?");
+        let op         = op_col.get(i).unwrap_or("?");
+        let bucket     = bucket_col.get(i).unwrap_or("?");
         let bucket_num = bucket_num_col.get(i).unwrap_or(0);
-        let mean = mean_lat.get(i).unwrap_or(0.0);
-        let med = med_lat.get(i).unwrap_or(0.0);
-        let p90 = p90_lat.get(i).unwrap_or(0.0);
-        let p95 = p95_lat.get(i).unwrap_or(0.0);
-        let p99 = p99_lat.get(i).unwrap_or(0.0);
-        let max = max_lat.get(i).unwrap_or(0.0);
-        let avg = avg_kb.get(i).unwrap_or(0.0);
-        let ops = ops_sec.get(i).unwrap_or(0.0);
-        let xp = xput.get(i).unwrap_or(0.0);
-        let cnt = count_col.get(i).unwrap_or(0);
+        let mean       = mean_lat.get(i).unwrap_or(0.0);
+        let med        = med_lat.get(i).unwrap_or(0.0);
+        let p90        = p90_lat.get(i).unwrap_or(0.0);
+        let p95        = p95_lat.get(i).unwrap_or(0.0);
+        let p99        = p99_lat.get(i).unwrap_or(0.0);
+        let max        = max_lat.get(i).unwrap_or(0.0);
+        let avg        = avg_kb.get(i).unwrap_or(0.0);
+        let cnt        = count_col.get(i).unwrap_or(0);
+        let bsum       = bytes_sum_col.get(i).unwrap_or(0.0);
+        let conc       = concurrency_col.as_ref().map_or(0, |c| c.get(i).unwrap_or(0));
 
         // Skip rows with zero count (empty buckets or invalid data)
         if cnt == 0 {
             continue;
         }
 
-        println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
+        // Compute throughput using per-op time range (fix for non-overlapping workloads, issue #14)
+        let eff_time = op_eff_time(op);
+        let ops = cnt as f64 / eff_time;
+        let xp  = bsum / (1024.0 * 1024.0 * eff_time);
+
+        println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
                  op, bucket, bucket_num,
+                 format_int_with_commas(conc as i64),
                  format_with_commas(mean),
                  format_with_commas(med),
                  format_with_commas(p90),
@@ -590,28 +656,28 @@ fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str, pe
     }
 
     // Print summary rows for each operation category (META, GET, PUT)
-    // These use statistically valid percentiles computed from ALL raw data
+    // These use statistically valid percentiles from ALL raw data for that op category
     println!(); // Separator line before summaries
-    
-    // Compute summary for META operations (LIST, HEAD, DELETE, STAT)
-    compute_and_print_summary_row(df, run_time_secs, "META", &META_OPS, 97)?;
-    
-    // Compute summary for GET operations
-    compute_and_print_summary_row(df, run_time_secs, "GET", &["GET"], 98)?;
-    
-    // Compute summary for PUT operations
-    compute_and_print_summary_row(df, run_time_secs, "PUT", &["PUT"], 99)?;
+
+    compute_and_print_summary_row(df, run_time_secs, meta_time, "META", &META_OPS, 97)?;
+    compute_and_print_summary_row(df, run_time_secs, get_time,  "GET",  &["GET"],  98)?;
+    compute_and_print_summary_row(df, run_time_secs, put_time,  "PUT",  &["PUT"],  99)?;
 
     // Print grand total
     let total_ops: u64 = count_col.into_iter().flatten().map(|x| x as u64).sum();
     let total_ops_sec: f64 = total_ops as f64 / run_time_secs;
-    println!("\nTotal operations: {}  ({:.2}/sec)", 
+    println!("\nTotal operations: {}  ({:.2}/sec)",
              format_int_with_commas(total_ops as i64),
              total_ops_sec);
 
     // Print per-client statistics if requested
     if per_client {
         compute_and_print_per_client_stats(df, run_time_secs)?;
+    }
+
+    // Print per-endpoint statistics if requested (issue #15)
+    if per_endpoint {
+        compute_and_print_per_endpoint_stats(df, run_time_secs)?;
     }
 
     Ok(())
@@ -779,12 +845,182 @@ fn compute_and_print_per_client_stats(df: &DataFrame, run_time_secs: f64) -> Res
     Ok(())
 }
 
-/// Compute and print a summary row for a category of operations
-/// This computes statistically valid percentiles from ALL raw data (not averaged)
+/// Compute and print per-endpoint statistics to show variation across endpoints (issue #15)
+fn compute_and_print_per_endpoint_stats(df: &DataFrame, run_time_secs: f64) -> Result<()> {
+    // Check if endpoint column exists
+    if df.column("endpoint").is_err() {
+        println!("\nWarning: endpoint column not found, skipping per-endpoint statistics.");
+        return Ok(());
+    }
+
+    // Get unique endpoints
+    let unique_endpoints = df.column("endpoint")?.unique()?;
+    let endpoints = unique_endpoints
+        .str()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    if endpoints.len() <= 1 {
+        println!("\nOnly one endpoint detected, skipping per-endpoint statistics.");
+        return Ok(());
+    }
+
+    println!("\n{}", "=".repeat(80));
+    println!("Per-Endpoint Statistics ({} endpoints detected)", endpoints.len());
+    println!("{}", "=".repeat(80));
+
+    // Compute overall stats per endpoint
+    let endpoint_stats = df.clone().lazy()
+        .group_by([col("endpoint")])
+        .agg([
+            (col("duration_ns").mean() / lit(1000.0)).alias("mean_lat_us"),
+            (col("duration_ns").median() / lit(1000.0)).alias("med_lat_us"),
+            (col("duration_ns").quantile(lit(0.90), QuantileMethod::Linear) / lit(1000.0)).alias("p90_lat_us"),
+            (col("duration_ns").quantile(lit(0.95), QuantileMethod::Linear) / lit(1000.0)).alias("p95_lat_us"),
+            (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99_lat_us"),
+            (col("duration_ns").max() / lit(1000.0)).alias("max_lat_us"),
+            (col("bytes").mean() / lit(1024.0)).alias("avg_obj_KB"),
+            (col("op").count().cast(DataType::Float64) / lit(run_time_secs)).alias("ops_per_sec"),
+            ((col("bytes").sum().cast(DataType::Float64) / lit(1024.0 * 1024.0)) / lit(run_time_secs)).alias("xput_MBps"),
+            col("op").count().alias("count"),
+        ])
+        .sort(["endpoint"], SortMultipleOptions::default())
+        .collect()?;
+
+    // Print header
+    println!("{:>30} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
+             "endpoint", "mean_lat_us", "med._lat_us", "90%_lat_us", "95%_lat_us",
+             "99%_lat_us", "max_lat_us", "avg_obj_KB", "ops_/_sec", "xput_MBps", "count");
+
+    let ep_col   = endpoint_stats.column("endpoint")?.str()?;
+    let mean_lat = endpoint_stats.column("mean_lat_us")?.f64()?;
+    let med_lat  = endpoint_stats.column("med_lat_us")?.f64()?;
+    let p90_lat  = endpoint_stats.column("p90_lat_us")?.f64()?;
+    let p95_lat  = endpoint_stats.column("p95_lat_us")?.f64()?;
+    let p99_lat  = endpoint_stats.column("p99_lat_us")?.f64()?;
+    let max_lat  = endpoint_stats.column("max_lat_us")?.f64()?;
+    let avg_kb   = endpoint_stats.column("avg_obj_KB")?.f64()?;
+    let ops_sec  = endpoint_stats.column("ops_per_sec")?.f64()?;
+    let xput     = endpoint_stats.column("xput_MBps")?.f64()?;
+    let count_col = endpoint_stats.column("count")?.u32()?;
+
+    for i in 0..endpoint_stats.height() {
+        let ep   = ep_col.get(i).unwrap_or("?");
+        let mean = mean_lat.get(i).unwrap_or(0.0);
+        let med  = med_lat.get(i).unwrap_or(0.0);
+        let p90  = p90_lat.get(i).unwrap_or(0.0);
+        let p95  = p95_lat.get(i).unwrap_or(0.0);
+        let p99  = p99_lat.get(i).unwrap_or(0.0);
+        let max  = max_lat.get(i).unwrap_or(0.0);
+        let avg  = avg_kb.get(i).unwrap_or(0.0);
+        let ops  = ops_sec.get(i).unwrap_or(0.0);
+        let xp   = xput.get(i).unwrap_or(0.0);
+        let cnt  = count_col.get(i).unwrap_or(0);
+
+        // Skip null/unknown endpoints and zero-count rows
+        if cnt == 0 || ep == "?" {
+            continue;
+        }
+
+        println!("{:>30} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
+                 ep,
+                 format_with_commas(mean),
+                 format_with_commas(med),
+                 format_with_commas(p90),
+                 format_with_commas(p95),
+                 format_with_commas(p99),
+                 format_with_commas(max),
+                 format_with_commas(avg),
+                 format_with_commas(ops),
+                 format_with_commas(xp),
+                 format_int_with_commas(cnt as i64));
+    }
+
+    // Print per-endpoint stats by operation type
+    println!("\nPer-Endpoint Statistics by Operation Type:");
+    println!("{}", "-".repeat(80));
+
+    let categories = vec![
+        ("META", META_OPS.to_vec()),
+        ("GET", vec!["GET"]),
+        ("PUT", vec!["PUT"]),
+    ];
+
+    for (op_name, ops_list) in categories {
+        let mut filter_expr = lit(false);
+        for op in &ops_list {
+            filter_expr = filter_expr.or(col("op").eq(lit(*op)));
+        }
+
+        let op_ep_stats = df.clone().lazy()
+            .filter(filter_expr)
+            .group_by([col("endpoint")])
+            .agg([
+                (col("duration_ns").mean() / lit(1000.0)).alias("mean_lat_us"),
+                (col("duration_ns").median() / lit(1000.0)).alias("med_lat_us"),
+                (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99_lat_us"),
+                (col("op").count().cast(DataType::Float64) / lit(run_time_secs)).alias("ops_per_sec"),
+                ((col("bytes").sum().cast(DataType::Float64) / lit(1024.0 * 1024.0)) / lit(run_time_secs)).alias("xput_MBps"),
+                col("op").count().alias("count"),
+            ])
+            .sort(["endpoint"], SortMultipleOptions::default())
+            .collect()?;
+
+        if op_ep_stats.height() == 0 {
+            continue;
+        }
+
+        println!("\n{} Operations:", op_name);
+        println!("{:>30} {:>11} {:>11} {:>10} {:>9} {:>9} {:>9}",
+                 "endpoint", "mean_lat_us", "med._lat_us", "99%_lat_us", "ops_/_sec", "xput_MBps", "count");
+
+        let ep_col    = op_ep_stats.column("endpoint")?.str()?;
+        let mean_lat  = op_ep_stats.column("mean_lat_us")?.f64()?;
+        let med_lat   = op_ep_stats.column("med_lat_us")?.f64()?;
+        let p99_lat   = op_ep_stats.column("p99_lat_us")?.f64()?;
+        let ops_sec   = op_ep_stats.column("ops_per_sec")?.f64()?;
+        let xput      = op_ep_stats.column("xput_MBps")?.f64()?;
+        let count_col = op_ep_stats.column("count")?.u32()?;
+
+        for i in 0..op_ep_stats.height() {
+            let ep  = ep_col.get(i).unwrap_or("?");
+            let mean = mean_lat.get(i).unwrap_or(0.0);
+            let med  = med_lat.get(i).unwrap_or(0.0);
+            let p99  = p99_lat.get(i).unwrap_or(0.0);
+            let ops  = ops_sec.get(i).unwrap_or(0.0);
+            let xp   = xput.get(i).unwrap_or(0.0);
+            let cnt  = count_col.get(i).unwrap_or(0);
+
+            // Skip null/unknown endpoints and zero-count rows
+            if cnt == 0 || ep == "?" {
+                continue;
+            }
+
+            println!("{:>30} {:>11} {:>11} {:>10} {:>9} {:>9} {:>9}",
+                     ep,
+                     format_with_commas(mean),
+                     format_with_commas(med),
+                     format_with_commas(p99),
+                     format_with_commas(ops),
+                     format_with_commas(xp),
+                     format_int_with_commas(cnt as i64));
+        }
+    }
+
+    println!("\n{}\n", "=".repeat(80));
+
+    Ok(())
+}
+
+/// Compute and print a summary row for a category of operations.
+/// Uses op_run_time for throughput (not the global run_time_secs) to correctly
+/// handle non-overlapping workloads (issue #14). Includes concurrency (issue #16).
 fn compute_and_print_summary_row(
-    df: &DataFrame, 
-    run_time_secs: f64, 
-    category: &str, 
+    df: &DataFrame,
+    run_time_secs: f64,
+    op_run_time: f64,
+    category: &str,
     ops: &[&str],
     bucket_idx: i32,
 ) -> Result<()> {
@@ -793,51 +1029,62 @@ fn compute_and_print_summary_row(
     for op in ops {
         filter_expr = filter_expr.or(col("op").eq(lit(*op)));
     }
-    
-    // Filter to just this category and compute stats
+
+    // Check if thread column exists for concurrency reporting (issue #16)
+    let has_thread = df.column("thread").is_ok();
+
+    // Build select expressions; compute raw counts/bytes — rates applied post-collect
+    let mut select_exprs: Vec<Expr> = vec![
+        (col("duration_ns").mean() / lit(1000.0)).alias("mean_lat_us"),
+        (col("duration_ns").median() / lit(1000.0)).alias("med_lat_us"),
+        (col("duration_ns").quantile(lit(0.90), QuantileMethod::Linear) / lit(1000.0)).alias("p90_lat_us"),
+        (col("duration_ns").quantile(lit(0.95), QuantileMethod::Linear) / lit(1000.0)).alias("p95_lat_us"),
+        (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99_lat_us"),
+        (col("duration_ns").max() / lit(1000.0)).alias("max_lat_us"),
+        (col("bytes").mean() / lit(1024.0)).alias("avg_obj_KB"),
+        col("op").count().alias("count"),
+        col("bytes").sum().cast(DataType::Float64).alias("bytes_sum"),
+    ];
+    if has_thread {
+        select_exprs.push(col("thread").n_unique().alias("n_threads"));
+    }
+
     let category_stats = df.clone().lazy()
         .filter(filter_expr)
-        .select([
-            // Latency statistics (convert ns to µs) - computed on ALL raw data
-            (col("duration_ns").mean() / lit(1000.0)).alias("mean_lat_us"),
-            (col("duration_ns").median() / lit(1000.0)).alias("med_lat_us"),
-            (col("duration_ns").quantile(lit(0.90), QuantileMethod::Linear) / lit(1000.0)).alias("p90_lat_us"),
-            (col("duration_ns").quantile(lit(0.95), QuantileMethod::Linear) / lit(1000.0)).alias("p95_lat_us"),
-            (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99_lat_us"),
-            (col("duration_ns").max() / lit(1000.0)).alias("max_lat_us"),
-            // Size statistics
-            (col("bytes").mean() / lit(1024.0)).alias("avg_obj_KB"),
-            // Throughput (sum of counts and bytes)
-            (col("op").count().cast(DataType::Float64) / lit(run_time_secs)).alias("ops_per_sec"),
-            ((col("bytes").sum().cast(DataType::Float64) / lit(1024.0 * 1024.0)) / lit(run_time_secs)).alias("xput_MBps"),
-            col("op").count().alias("count"),
-        ])
+        .select(select_exprs)
         .collect()?;
 
     // Check if we have any data for this category
     if category_stats.height() == 0 {
         return Ok(());
     }
-    
+
     let count = category_stats.column("count")?.u32()?.get(0).unwrap_or(0);
     if count == 0 {
         return Ok(());
     }
 
-    // Extract values
-    let mean = category_stats.column("mean_lat_us")?.f64()?.get(0).unwrap_or(0.0);
-    let med = category_stats.column("med_lat_us")?.f64()?.get(0).unwrap_or(0.0);
-    let p90 = category_stats.column("p90_lat_us")?.f64()?.get(0).unwrap_or(0.0);
-    let p95 = category_stats.column("p95_lat_us")?.f64()?.get(0).unwrap_or(0.0);
-    let p99 = category_stats.column("p99_lat_us")?.f64()?.get(0).unwrap_or(0.0);
-    let max = category_stats.column("max_lat_us")?.f64()?.get(0).unwrap_or(0.0);
-    let avg = category_stats.column("avg_obj_KB")?.f64()?.get(0).unwrap_or(0.0);
-    let ops = category_stats.column("ops_per_sec")?.f64()?.get(0).unwrap_or(0.0);
-    let xp = category_stats.column("xput_MBps")?.f64()?.get(0).unwrap_or(0.0);
+    // Use per-op time for throughput (issue #14 fix: correct for non-overlapping workloads)
+    let eff_time = if op_run_time > 0.0 { op_run_time } else { run_time_secs };
 
-    // Print summary row with "ALL" as bucket label
-    println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
+    let mean  = category_stats.column("mean_lat_us")?.f64()?.get(0).unwrap_or(0.0);
+    let med   = category_stats.column("med_lat_us")?.f64()?.get(0).unwrap_or(0.0);
+    let p90   = category_stats.column("p90_lat_us")?.f64()?.get(0).unwrap_or(0.0);
+    let p95   = category_stats.column("p95_lat_us")?.f64()?.get(0).unwrap_or(0.0);
+    let p99   = category_stats.column("p99_lat_us")?.f64()?.get(0).unwrap_or(0.0);
+    let max   = category_stats.column("max_lat_us")?.f64()?.get(0).unwrap_or(0.0);
+    let avg   = category_stats.column("avg_obj_KB")?.f64()?.get(0).unwrap_or(0.0);
+    let bsum  = category_stats.column("bytes_sum")?.f64()?.get(0).unwrap_or(0.0);
+    let n_thr: u32 = if has_thread {
+        category_stats.column("n_threads")?.u32()?.get(0).unwrap_or(0)
+    } else { 0 };
+
+    let ops = count as f64 / eff_time;
+    let xp  = bsum / (1024.0 * 1024.0 * eff_time);
+
+    println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
              category, "ALL", bucket_idx,
+             format_int_with_commas(n_thr as i64),
              format_with_commas(mean),
              format_with_commas(med),
              format_with_commas(p90),

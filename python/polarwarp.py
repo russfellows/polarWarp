@@ -124,28 +124,127 @@ def compute_per_client_stats(df, run_time_secs):
     return client_stats
 
 
+def compute_per_endpoint_stats(df, run_time_secs):
+    """
+    Compute statistics grouped by endpoint to show variation across storage nodes.
+    Returns a DataFrame with per-endpoint summary statistics.
+    """
+    if "endpoint" not in df.columns:
+        print("\nendpoint column not found, skipping per-endpoint statistics.")
+        return None
+
+    endpoints = df.select(
+        pl.col("endpoint").drop_nulls().unique()
+    ).to_series().to_list()
+
+    if len(endpoints) <= 1:
+        print("\nOnly one endpoint detected, skipping per-endpoint statistics.")
+        return None
+
+    print(f"\n{'='*80}")
+    print(f"Per-Endpoint Statistics ({len(endpoints)} endpoints detected)")
+    print(f"{'='*80}")
+
+    endpoint_stats = df.group_by(["endpoint"]).agg([
+        (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
+        (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
+        (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
+        (pl.col("duration_ns").quantile(0.95) / 1000).alias("95%_lat_us"),
+        (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
+        (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
+        (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
+        (pl.count("op") / run_time_secs).alias("ops_/_sec"),
+        ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias("xput_MBps"),
+        pl.count("op").alias("count"),
+    ]).filter(
+        pl.col("endpoint").is_not_null() & (pl.col("count") > 0)
+    ).sort("endpoint")
+
+    endpoint_stats_pd = endpoint_stats.to_pandas()
+    columns_to_format = [
+        "mean_lat_us", "med._lat_us", "90%_lat_us", "95%_lat_us", "99%_lat_us",
+        "max_lat_us", "avg_obj_KB", "ops_/_sec", "xput_MBps", "count"
+    ]
+    for column in columns_to_format:
+        if column in endpoint_stats_pd:
+            endpoint_stats_pd[column] = endpoint_stats_pd[column].map(format_with_commas)
+
+    print(endpoint_stats_pd.to_string(index=False))
+
+    # Per-endpoint stats by op type
+    print(f"\nPer-Endpoint Statistics by Operation Type:")
+    print(f"{'-'*80}")
+
+    for op_type in ["META", "GET", "PUT"]:
+        if op_type == "META":
+            op_df = df.filter(pl.col("op").is_in(META_OPS))
+        else:
+            op_df = df.filter(pl.col("op") == op_type)
+
+        if op_df.height == 0:
+            continue
+
+        op_ep_stats = op_df.group_by(["endpoint"]).agg([
+            (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
+            (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
+            (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
+            (pl.count("op") / run_time_secs).alias("ops_/_sec"),
+            ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias("xput_MBps"),
+            pl.count("op").alias("count"),
+        ]).filter(
+            pl.col("endpoint").is_not_null() & (pl.col("count") > 0)
+        ).sort("endpoint")
+
+        op_ep_stats_pd = op_ep_stats.to_pandas()
+        for column in ["mean_lat_us", "med._lat_us", "99%_lat_us", "ops_/_sec", "xput_MBps", "count"]:
+            if column in op_ep_stats_pd:
+                op_ep_stats_pd[column] = op_ep_stats_pd[column].map(format_with_commas)
+
+        print(f"\n{op_type} Operations:")
+        print(op_ep_stats_pd.to_string(index=False))
+
+    print(f"\n{'='*80}\n")
+    return endpoint_stats
+
+
 def compute_summary_rows(df, run_time_secs):
     """
     Compute summary rows for operation categories (META, GET, PUT).
     Returns a list of summary row dictionaries with statistically valid percentiles.
+    Uses per-operation time ranges for correct throughput on non-overlapping workloads (issue #14).
+    Includes concurrency (distinct thread count) in each row (issue #16).
     """
     summary_rows = []
-    
+
+    has_thread = "thread" in df.columns
+
     # Define operation categories: (category_name, operations_list, bucket_idx)
     categories = [
         ("META", META_OPS, 97),
         ("GET", ["GET"], 98),
         ("PUT", ["PUT"], 99),
     ]
-    
+
     for category_name, ops_list, bucket_idx in categories:
         # Filter to just this category
         category_df = df.filter(pl.col("op").is_in(ops_list))
-        
+
         if category_df.height == 0:
             continue
-        
-        # Compute statistically valid percentiles on ALL raw data
+
+        # Compute per-op time range (issue #14: correct for non-overlapping workloads)
+        min_start = category_df.select(pl.col("start").min()).item()
+        max_end   = category_df.select(pl.col("end").max()).item()
+        if min_start is not None and max_end is not None:
+            op_time = (max_end - min_start).total_seconds()
+            op_time = op_time if op_time > 0.001 else run_time_secs
+        else:
+            op_time = run_time_secs
+
+        # Concurrency: distinct thread IDs for this op category (issue #16)
+        n_threads = int(category_df.select(pl.col("thread").n_unique()).item()) if has_thread else 0
+
+        # Compute statistically valid percentiles on ALL raw data for this category
         stats = category_df.select([
             (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
             (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
@@ -154,17 +253,18 @@ def compute_summary_rows(df, run_time_secs):
             (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
             (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
             (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
-            (pl.count("op") / run_time_secs).alias("ops_/_sec"),
-            ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias("xput_MBps"),
+            (pl.count("op").cast(pl.Float64) / op_time).alias("ops_/_sec"),
+            ((pl.col("bytes").sum().cast(pl.Float64) / (1024 * 1024)) / op_time).alias("xput_MBps"),
             pl.count("op").alias("count"),
         ])
-        
+
         row = stats.row(0, named=True)
         row["op"] = category_name
         row["bytes_bucket"] = "ALL"
         row["bucket_#"] = bucket_idx
+        row["concurrency"] = n_threads
         summary_rows.append(row)
-    
+
     return summary_rows
 
 
@@ -178,9 +278,9 @@ def print_summary_rows(summary_rows, columns_to_format):
     print()  # Separator line
     
     summary_df = pd.DataFrame(summary_rows)
-    # Reorder columns to match main output
-    column_order = ["op", "bytes_bucket", "bucket_#", "mean_lat_us", "med._lat_us", 
-                    "90%_lat_us", "95%_lat_us", "99%_lat_us", "max_lat_us", 
+    # Reorder columns to match main output (concurrency added for issue #16)
+    column_order = ["op", "bytes_bucket", "bucket_#", "concurrency", "mean_lat_us", "med._lat_us",
+                    "90%_lat_us", "95%_lat_us", "99%_lat_us", "max_lat_us",
                     "avg_obj_KB", "ops_/_sec", "xput_MBps", "count"]
     summary_df = summary_df[[c for c in column_order if c in summary_df.columns]]
     
@@ -204,6 +304,7 @@ def print_usage():
     print(f"                 Format: <number>s (seconds) or <number>m (minutes)")
     print(f"                 Example: --skip=90s or --skip=5m")
     print(f"  --per-client   Generate per-client statistics (in addition to overall stats)")
+    print(f"  --per-endpoint Generate per-endpoint statistics (in addition to overall stats)")
     print(f"  --help         Show this help message and exit")
     print(f"\nArguments:")
     print(f"  file1 file2... One or more oplog files to process (TSV/CSV, optionally .zst compressed)")
@@ -227,6 +328,7 @@ if "--help" in sys.argv or "-h" in sys.argv:
 # Process the --skip argument
 skip_time = None
 per_client_stats = False
+per_endpoint_stats = False
 file_paths = []
 skip_pattern = re.compile(r"^--skip=(\d+)([sm])$")
 
@@ -237,6 +339,9 @@ for arg in sys.argv[1:]:
         if arg == "--per-client":
             per_client_stats = True
             print("Per-client statistics enabled")
+        elif arg == "--per-endpoint":
+            per_endpoint_stats = True
+            print("Per-endpoint statistics enabled")
         else:
             match = skip_pattern.match(arg)
             if match:
@@ -287,8 +392,9 @@ for file_path in file_paths:
         process_start = time.time()
         
         # Try to read the file with error handling
+        # glob=False prevents polars from treating brackets in filenames as glob patterns
         try:
-            df = pl.read_csv(file_path, ignore_errors=True, separator='\t')
+            df = pl.read_csv(file_path, ignore_errors=True, separator='\t', glob=False)
         except Exception as e:
             print_error(f"Failed to read file '{file_path}': {e}")
         
@@ -392,8 +498,28 @@ for file_path in file_paths:
         .otherwise(8).alias("bucket_#")
     ])
 
+# Pre-compute per-operation time ranges (issue #14: correct for non-overlapping workloads)
+    def _op_time(op_df):
+        if op_df.height == 0:
+            return run_time_secs
+        min_s = op_df.select(pl.col("start").min()).item()
+        max_e = op_df.select(pl.col("end").max()).item()
+        if min_s is None or max_e is None:
+            return run_time_secs
+        dt = (max_e - min_s).total_seconds()
+        return dt if dt > 0.001 else run_time_secs
+
+    _meta_time = _op_time(df.filter(pl.col("op").is_in(META_OPS)))
+    _get_time  = _op_time(df.filter(pl.col("op") == "GET"))
+    _put_time  = _op_time(df.filter(pl.col("op") == "PUT"))
+
+    # Build op -> run_time mapping
+    _op_time_map = {op: _meta_time for op in META_OPS}
+    _op_time_map["GET"] = _get_time
+    _op_time_map["PUT"] = _put_time
+
 # Now group the results by operation type and our bucket sizes
-    result = df.group_by(["op", "bytes_bucket", "bucket_#"]).agg([
+    _agg_exprs = [
         (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
         (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
         (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
@@ -401,15 +527,26 @@ for file_path in file_paths:
         (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
         (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
         (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
-        (pl.count("op") / run_time_secs).alias("ops_/_sec"),
-        ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias("xput_MBps"),
-        pl.count("op").alias("count")
-    ])
+        pl.count("op").alias("count"),
+        pl.col("bytes").sum().alias("bytes_sum"),
+    ]
+    if "thread" in df.columns:
+        _agg_exprs.append(pl.col("thread").n_unique().alias("concurrency"))
+
+    result = df.group_by(["op", "bytes_bucket", "bucket_#"]).agg(_agg_exprs)
+
+    # Compute per-op throughput rates using the correct per-op time range (issue #14)
+    result = result.with_columns(
+        pl.col("op").map_elements(lambda op: _op_time_map.get(op, run_time_secs), return_dtype=pl.Float64).alias("_op_t")
+    ).with_columns([
+        (pl.col("count").cast(pl.Float64) / pl.col("_op_t")).alias("ops_/_sec"),
+        (pl.col("bytes_sum").cast(pl.Float64) / (1024 * 1024) / pl.col("_op_t")).alias("xput_MBps"),
+    ]).drop(["_op_t", "bytes_sum"])
 
     # Ensure throughput is in Float64 format for consistency
     result = result.with_columns(pl.col("xput_MBps").cast(pl.Float64))
 
-    # Calculate throughput metrics for the current file
+    # Calculate throughput metrics for the current file (used in multi-file consolidation)
     throughput_metrics = df.group_by("op", "bytes_bucket").agg([
         ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias("xput_MBps"),
         pl.count("op").alias("count"),
@@ -419,10 +556,16 @@ for file_path in file_paths:
     throughput_metrics = throughput_metrics.with_columns(pl.col("op").cast(pl.Utf8))
 
     final_result = result.sort(["bucket_#", "op"])
-    
+
     # Filter out rows with zero count (empty buckets or invalid data)
     final_result = final_result.filter(pl.col("count") > 0)
-    
+
+    # Reorder columns (include concurrency for issue #16)
+    _col_order = ["op", "bytes_bucket", "bucket_#", "concurrency", "mean_lat_us", "med._lat_us",
+                  "90%_lat_us", "95%_lat_us", "99%_lat_us", "max_lat_us",
+                  "avg_obj_KB", "ops_/_sec", "xput_MBps", "count"]
+    final_result = final_result.select([c for c in _col_order if c in final_result.columns])
+
     final_result_pd = final_result.to_pandas()
 
 # List of columns to send to the pretty comma-fyer
@@ -451,6 +594,10 @@ for file_path in file_paths:
     # Print per-client statistics if requested
     if per_client_stats:
         compute_per_client_stats(df, run_time_secs)
+
+    # Print per-endpoint statistics if requested (issue #15)
+    if per_endpoint_stats:
+        compute_per_endpoint_stats(df, run_time_secs)
 
     # Print processing time (matching Rust output)
     process_elapsed = time.time() - process_start
@@ -547,3 +694,7 @@ print_summary_rows(summary_rows, columns_to_format)
 # Print per-client statistics for consolidated data if requested
 if per_client_stats:
     compute_per_client_stats(consolidated_df, consolidated_run_secs)
+
+# Print per-endpoint statistics for consolidated data if requested (issue #15)
+if per_endpoint_stats:
+    compute_per_endpoint_stats(consolidated_df, consolidated_run_secs)

@@ -10,16 +10,12 @@ license = "Apache-2.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-polars = { version = "0.52.0", features = ["csv", "decompress", "lazy", "dtype-datetime", "strings", "temporal", "timezones", "describe", "ndarray", "zip_with", "performant", "regex"] }
-chrono = "0.4.42"
+polars = { version = "0.53.0", features = ["csv", "decompress", "lazy", "dtype-datetime", "strings", "temporal", "timezones", "describe", "ndarray", "zip_with", "performant", "regex"] }
 clap = { version = "4.5.53", features = ["derive"] }
-csv = "1.4.0"
 zstd = "0.13.3"
-thiserror = "2.0.17"
 anyhow = "1.0.100"
 num-format = "0.4.4"
 regex = "1.12.2"
-rayon = "1.11.0"
 
 [profile.release]
 lto = true

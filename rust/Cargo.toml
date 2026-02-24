@@ -11,12 +11,12 @@ license = "Apache-2.0"
 
 [dependencies]
 polars = { version = "0.53.0", features = ["csv", "decompress", "lazy", "dtype-datetime", "strings", "temporal", "timezones", "describe", "ndarray", "zip_with", "performant", "regex"] }
-clap = { version = "4.5.53", features = ["derive"] }
+clap = { version = "4.5.60", features = ["derive"] }
 zstd = "0.13.3"
-anyhow = "1.0.100"
+anyhow = "1.0.102"
 num-format = "0.4.4"
-regex = "1.12.2"
-rust_xlsxwriter = "^0.79"  # Excel file generation
+regex = "1.12.3"
+rust_xlsxwriter = "0.93.0"  # Excel file generation
 
 [profile.release]
 lto = true

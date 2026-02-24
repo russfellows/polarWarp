@@ -47,6 +47,13 @@ const BUCKET_LABELS: [&str; NUM_BUCKETS] = [
 /// Metadata operations that should be grouped together
 const META_OPS: [&str; 4] = ["LIST", "HEAD", "DELETE", "STAT"];
 
+/// Multi-file consolidation overlap thresholds (Jaccard = overlap / union).
+/// Below MIN → files are sequential runs, consolidation is skipped.
+/// Above MAX → files are treated as fully concurrent, no warning emitted.
+/// Between MIN and MAX → partial overlap: warn, but still consolidate the intersection.
+const OVERLAP_MIN_PCT: f64 = 3.0;
+const OVERLAP_MAX_PCT: f64 = 97.0;
+
 /// CLI arguments
 #[derive(Parser)]
 #[command(
@@ -201,8 +208,14 @@ fn main() -> Result<()> {
 
     // Store results from each file for consolidation
     let mut all_dataframes: Vec<DataFrame> = Vec::new();
-    let mut global_start_ns: Option<i64> = None;
-    let mut global_end_ns: Option<i64> = None;
+    // Overlap window: latest start / earliest end across all files
+    let mut overlap_start_ns: Option<i64> = None;
+    let mut overlap_end_ns:   Option<i64> = None;
+    // Union window: earliest start / latest end across all files
+    let mut union_start_ns: Option<i64> = None;
+    let mut union_end_ns:   Option<i64> = None;
+    // Per-file time ranges for diagnostic output
+    let mut file_ranges: Vec<(String, i64, i64)> = Vec::new();
 
     // Excel: per-file collected rows (main_rows, detail_rows, file_path)
     let mut file_excel_data: Vec<FileExcelEntry> = Vec::new();
@@ -222,19 +235,13 @@ fn main() -> Result<()> {
             args.per_endpoint,
         )?;
 
-        // Update global time range
+        // Update overlap (latest-start / earliest-end) and union (earliest-start / latest-end)
         if let (Some(fs), Some(fe)) = (file_start_ns, file_end_ns) {
-            match (global_start_ns, global_end_ns) {
-                (None, None) => {
-                    global_start_ns = Some(fs);
-                    global_end_ns = Some(fe);
-                }
-                (Some(gs), Some(ge)) => {
-                    global_start_ns = Some(gs.max(fs));
-                    global_end_ns = Some(ge.min(fe));
-                }
-                _ => {}
-            }
+            overlap_start_ns = Some(overlap_start_ns.map_or(fs, |v: i64| v.max(fs)));
+            overlap_end_ns   = Some(overlap_end_ns  .map_or(fe, |v: i64| v.min(fe)));
+            union_start_ns   = Some(union_start_ns  .map_or(fs, |v: i64| v.min(fs)));
+            union_end_ns     = Some(union_end_ns    .map_or(fe, |v: i64| v.max(fe)));
+            file_ranges.push((file_path.clone(), fs, fe));
         }
 
         // Store the processed dataframe for consolidation
@@ -261,32 +268,80 @@ fn main() -> Result<()> {
     // If we have multiple files, consolidate results
     if args.files.len() > 1 && !args.basic_stats {
         println!("\nDone Processing Files... Consolidating Results");
-        
-        if let (Some(gs), Some(ge)) = (global_start_ns, global_end_ns) {
-            if gs >= ge {
-                println!("No overlapping time range found between files, no Consolidated results are valid.");
-                return Ok(());
-            }
-            
-            let run_time_secs = (ge - gs) as f64 / 1_000_000_000.0;
-            let run_time_formatted = format_duration_ns(ge - gs);
-            println!("The consolidated running time is {}, time in seconds is: {:.2}", 
-                     run_time_formatted, run_time_secs);
 
-            // Concatenate all dataframes
-            let consolidated_df = concat_dataframes(&all_dataframes)?;
-            
-            // Compute and display consolidated stats
-            compute_and_display_stats(&consolidated_df, run_time_secs, "Consolidated Results:", args.per_client, args.per_endpoint)?;
+        // Print per-file time ranges for transparency
+        for (fp, fs, fe) in &file_ranges {
+            println!("  File time range: {}  (duration: {})",
+                     fp, format_duration_ns(fe - fs));
+        }
 
-            // Collect consolidated Excel rows if requested
-            if excel_path.is_some() {
-                let (main_rows, detail_rows) =
-                    collect_stats_rows(&consolidated_df, run_time_secs, args.per_client, args.per_endpoint)?;
-                consolidated_excel = Some((main_rows, detail_rows));
+        match (overlap_start_ns, overlap_end_ns, union_start_ns, union_end_ns) {
+            (Some(os), Some(oe), Some(us), Some(ue)) => {
+                let overlap_dur = oe - os;   // may be ≤ 0 if no intersection
+                let union_dur   = ue - us;
+
+                // Jaccard in [0, 1]; clamp to 0 if no intersection
+                let jaccard_pct = if overlap_dur <= 0 || union_dur <= 0 {
+                    0.0_f64
+                } else {
+                    (overlap_dur as f64 / union_dur as f64) * 100.0
+                };
+
+                println!("  Overlap window: {} ns  Union window: {} ns", overlap_dur.max(0), union_dur);
+                println!("  Jaccard overlap: {:.1}%  (overlap / union)", jaccard_pct);
+
+                if jaccard_pct < OVERLAP_MIN_PCT {
+                    // Files are sequential – consolidation would be meaningless
+                    println!(
+                        "WARNING: Files appear to be sequential runs ({:.1}% Jaccard overlap < {:.0}% threshold).",
+                        jaccard_pct, OVERLAP_MIN_PCT
+                    );
+                    println!("  Skipping consolidation – per-file results above are still valid.");
+                } else {
+                    // Partial or full overlap – filter every dataframe to the intersection
+                    // window so that counts and throughput are computed over the same time
+                    // slice across all files.
+                    if jaccard_pct < OVERLAP_MAX_PCT {
+                        println!(
+                            "WARNING: Partial overlap detected ({:.1}% Jaccard).  \
+                             Filtering all files to overlap window before consolidating.",
+                            jaccard_pct
+                        );
+                    } else {
+                        println!("Files are concurrent runs ({:.1}% Jaccard).  Consolidating overlap window.",
+                                 jaccard_pct);
+                    }
+
+                    let overlap_secs = overlap_dur as f64 / 1_000_000_000.0;
+                    println!("  Overlap duration: {}  ({:.2} s)",
+                             format_duration_ns(overlap_dur), overlap_secs);
+
+                    // Filter each dataframe to operations whose start falls within
+                    // [overlap_start, overlap_end) then concatenate
+                    let filtered: Vec<DataFrame> = all_dataframes
+                        .into_iter()
+                        .map(|df| filter_to_window(df, os, oe))
+                        .collect::<Result<_>>()?;
+
+                    let consolidated_df = concat_dataframes(&filtered)?;
+
+                    // Compute and display consolidated stats
+                    compute_and_display_stats(
+                        &consolidated_df, overlap_secs,
+                        "Consolidated Results:", args.per_client, args.per_endpoint,
+                    )?;
+
+                    // Collect consolidated Excel rows if requested
+                    if excel_path.is_some() {
+                        let (main_rows, detail_rows) =
+                            collect_stats_rows(&consolidated_df, overlap_secs, args.per_client, args.per_endpoint)?;
+                        consolidated_excel = Some((main_rows, detail_rows));
+                    }
+                }
             }
-        } else {
-            println!("No valid data to consolidate.");
+            _ => {
+                println!("No valid time data to consolidate.");
+            }
         }
     }
 
@@ -366,6 +421,18 @@ fn concat_dataframes(dfs: &[DataFrame]) -> Result<DataFrame> {
         .collect()?;
     
     Ok(result)
+}
+
+/// Filter a dataframe to rows whose `start_ns` falls within [window_start, window_end).
+/// Used to restrict each file's data to the shared overlap window before consolidating.
+fn filter_to_window(df: DataFrame, window_start: i64, window_end: i64) -> Result<DataFrame> {
+    let filtered = df.lazy()
+        .filter(
+            col("start_ns").gt_eq(lit(window_start))
+            .and(col("start_ns").lt(lit(window_end)))
+        )
+        .collect()?;
+    Ok(filtered)
 }
 
 /// Format duration from nanoseconds to human-readable string (h:mm:ss.fraction)

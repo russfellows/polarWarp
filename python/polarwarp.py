@@ -672,14 +672,20 @@ if excel_path == "":
 # Per-file data saved for Excel export
 saved_file_dfs = []  # list of dict: {path, df, run_secs}
 
+# Multi-file consolidation overlap thresholds (Jaccard = overlap / union).
+# Below MIN  -> files are sequential runs, consolidation is skipped.
+# Above MAX  -> files are treated as fully concurrent, no warning emitted.
+# Between MIN and MAX -> partial overlap: warn, but still consolidate the intersection.
+OVERLAP_MIN_PCT = 3.0
+OVERLAP_MAX_PCT = 97.0
+
+# Per-file time ranges collected during the main loop [(path, file_start, file_end)]
+file_ranges = []
+
 # Create empty dataFrame for consolidate results
 consolidated_df = pl.DataFrame()
 consolidated_throughput_df = pl.DataFrame() 
 consolidated_throughputs = []
-
-# Initialize start and stop values
-global_start = None
-global_end = None
 
 #
 # Primary loop, process each file
@@ -741,19 +747,11 @@ for file_path in file_paths:
     except Exception as e:
         print_error(f"Unexpected error processing file '{file_path}': {e}")
 
-    if global_start is None or global_end is None:
-        if skip_time is not None:
-            global_start = start_time + skip_time
-        else:
-            global_start = start_time
-
-        global_end = end_time
-    else:
-        global_start = max(global_start, start_time)
-        global_end = min(global_end, end_time)
-
-    run_time_secs = (end_time - global_start).total_seconds()
-    run_time = (end_time - global_start)
+    # Per-file effective start (accounting for skip) and duration
+    file_start = (start_time + skip_time) if skip_time is not None else start_time
+    run_time = end_time - file_start
+    run_time_secs = run_time.total_seconds()
+    file_ranges.append((file_path, file_start, end_time))
 
     if skip_time is not None:
         threshold_time = start_time + skip_time
@@ -924,13 +922,50 @@ if len(file_paths) == 1:
 
 print(f"\nDone Processing Files... Consolidating Results")
 
-if global_start >= global_end:
-    print("No overlapping time range found between files, no Consolidated results are valid.")
+# Compute overlap (latest-start / earliest-end) and union (earliest-start / latest-end)
+# across all files. Jaccard = overlap / union is in [0, 100%].
+for fp, fs, fe in file_ranges:
+    print(f"  File time range: {fp}  (duration: {fe - fs})")
+
+overlap_start = max(r[1] for r in file_ranges)
+overlap_end   = min(r[2] for r in file_ranges)
+union_start   = min(r[1] for r in file_ranges)
+union_end     = max(r[2] for r in file_ranges)
+
+overlap_secs = max(0.0, (overlap_end - overlap_start).total_seconds())
+union_secs   = (union_end - union_start).total_seconds()
+jaccard_pct  = (overlap_secs / union_secs * 100.0) if union_secs > 0 and overlap_secs > 0 else 0.0
+
+print(f"  Overlap duration: {timedelta(seconds=overlap_secs)}  ({overlap_secs:.2f} s)")
+print(f"  Jaccard overlap: {jaccard_pct:.1f}%  (overlap / union)")
+
+if jaccard_pct < OVERLAP_MIN_PCT:
+    print(f"WARNING: Files appear to be sequential runs "
+          f"({jaccard_pct:.1f}% Jaccard overlap < {OVERLAP_MIN_PCT:.0f}% threshold).")
+    print("  Skipping consolidation \u2013 per-file results above are still valid.")
+    if excel_path is not None:
+        write_polarwarp_excel(excel_path, saved_file_dfs, per_client_stats, per_endpoint_stats)
+    sys.exit(0)
+
+if jaccard_pct < OVERLAP_MAX_PCT:
+    print(f"WARNING: Partial overlap detected ({jaccard_pct:.1f}% Jaccard).  "
+          f"Filtering all files to overlap window before consolidating.")
+else:
+    print(f"Files are concurrent runs ({jaccard_pct:.1f}% Jaccard).  Consolidating overlap window.")
+
+# Filter consolidated_df to only operations whose start falls within the overlap window.
+# This ensures counts and throughput are computed over the same time slice across all files.
+consolidated_df = consolidated_df.filter(
+    (pl.col("start") >= overlap_start) & (pl.col("start") < overlap_end)
+)
+
+if consolidated_df.is_empty():
+    print("No valid data in overlap window to consolidate.")
     sys.exit(1)
 
-consolidated_run_time = (global_end - global_start)
-consolidated_run_secs = (global_end - global_start).total_seconds() 
-print(f"The consolidated running time in h:mm:ss is {consolidated_run_time}, time in seconds is: {consolidated_run_secs}")
+consolidated_run_time = overlap_end - overlap_start
+consolidated_run_secs = overlap_secs
+print(f"The consolidated running time in h:mm:ss is {consolidated_run_time}, time in seconds is: {consolidated_run_secs:.2f}")
 
 # Adjust consolidated_stats to join on both "op" and "bytes_bucket"
 if consolidated_df.is_empty():

@@ -1,6 +1,6 @@
 # PolarWarp - Rust Implementation
 
-[![Version](https://img.shields.io/badge/version-0.1.1-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.5-blue.svg)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](../LICENSE)
 
@@ -18,6 +18,8 @@ Built with [Polars](https://pola.rs/) for blazing-fast DataFrame operations, pol
 - **Size-bucketed analysis**: 9 size buckets matching sai3-bench (zero, 1B-8KiB, 8KiB-64KiB, ... >2GiB)
 - **Summary rows**: Aggregate statistics for META (LIST/HEAD/DELETE/STAT), GET, and PUT operations
 - **Per-client statistics**: Compare performance across multiple clients with `--per-client` option
+- **Per-endpoint statistics**: Compare performance across storage endpoints with `--per-endpoint` option
+- **Excel export**: Export results to a formatted `.xlsx` workbook with `--excel`
 - **Latency percentiles**: mean, median, p90, p95, p99, max (statistically valid, not averaged)
 - **Throughput metrics**: ops/sec and MiB/sec per bucket
 - **Multi-file consolidation**: Combine results from multiple agents/files
@@ -53,6 +55,12 @@ polarwarp-rs --skip 2m oplog.tsv.zst
 # Compare performance across multiple clients
 polarwarp-rs --per-client multi_client_oplog.csv.zst
 
+# Export results to Excel
+polarwarp-rs --excel report.xlsx oplog.tsv.zst
+
+# Per-endpoint breakdown
+polarwarp-rs --per-endpoint oplog.tsv.zst
+
 # Show basic file info only
 polarwarp-rs --basic-stats oplog.tsv.zst
 ```
@@ -64,6 +72,8 @@ polarwarp-rs --basic-stats oplog.tsv.zst
 | `<FILES>...` | Input files to process (TSV/CSV, optionally zstd compressed) |
 | `-s, --skip <TIME>` | Skip warmup time from start (e.g., "90s", "5m") |
 | `--per-client` | Generate per-client statistics (in addition to overall stats) |
+| `--per-endpoint` | Generate per-endpoint statistics (in addition to overall stats) |
+| `--excel [=FILE]` | Export results to an Excel `.xlsx` workbook |
 | `--basic-stats` | Show basic file info without full processing |
 | `-h, --help` | Display help information |
 | `-V, --version` | Display version information |
@@ -71,9 +81,9 @@ polarwarp-rs --basic-stats oplog.tsv.zst
 ## Output Format
 
 ```
-      op bytes_bucket bucket_# mean_lat_us med._lat_us 90%_lat_us 95%_lat_us 99%_lat_us max_lat_us avg_obj_KB ops_/_sec xput_MBps     count
-    LIST         zero        0      533.98      533.98     533.98     533.98     533.98     533.98       0.00      0.20      0.00         1
-     GET      1B-8KiB        1       76.18       71.97     114.27     128.50     160.82   1,173.53       4.00 47,394.46    185.13   236,971
+      op bytes_bucket bucket_# mean_lat_us med._lat_us 90%_lat_us 95%_lat_us 99%_lat_us max_lat_us avg_obj_KB ops_/_sec xput_MBps     count max_threads runtime_s
+    LIST         zero        0      533.98      533.98     533.98     533.98     533.98     533.98       0.00      0.20      0.00         1           1      5.00
+     GET      1B-8KiB        1       76.18       71.97     114.27     128.50     160.82   1,173.53       4.00 47,394.46    185.13   236,971           8      5.00
 ```
 
 ### Size Buckets
@@ -141,7 +151,6 @@ idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  firs
 
 ## Future Enhancements
 
-- Export to TSV/CSV/JSON formats
 - Parallel file processing with Rayon
 - Time-window analysis for detecting performance changes
 - Comparative analysis between test runs

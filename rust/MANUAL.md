@@ -7,6 +7,7 @@ A guide for using PolarWarp-rs - the high-performance Rust implementation for an
 - [Basic Usage](#basic-usage)
 - [Command Line Options](#command-line-options)
 - [Output Format](#output-format)
+- [Excel Export](#excel-export)
 - [File Formats](#file-formats)
 - [Performance Expectations](#performance-expectations)
 - [Troubleshooting](#troubleshooting)
@@ -73,6 +74,9 @@ polarwarp-rs --skip 2m oplog.tsv.zst
 |--------|-------------|
 | `<FILES>...` | Input files to process (required) |
 | `-s, --skip <TIME>` | Skip initial warm-up period (e.g., "90s", "5m") |
+| `--per-client` | Generate per-client statistics in addition to overall stats |
+| `--per-endpoint` | Generate per-endpoint statistics in addition to overall stats |
+| `--excel [=FILE]` | Export results to an Excel `.xlsx` workbook; FILE defaults to first input filename |
 | `--basic-stats` | Show only basic file information without full processing |
 | `-h, --help` | Display help information |
 | `-V, --version` | Show version information |
@@ -96,6 +100,8 @@ PolarWarp-rs outputs a table with the following columns:
 | `ops_/_sec` | Operations per second |
 | `xput_MBps` | Throughput in MiB/sec |
 | `count` | Number of operations |
+| `max_threads` | Maximum distinct thread count observed in this bucket |
+| `runtime_s` | Effective time window (seconds) used for throughput calculation |
 
 ### Size Buckets
 
@@ -110,6 +116,42 @@ PolarWarp-rs outputs a table with the following columns:
 | 6 | 32MiB-256MiB | 32 MiB to 256 MiB |
 | 7 | 256MiB-2GiB | 256 MiB to 2 GiB |
 | 8 | >2GiB | Greater than 2 GiB |
+
+## Excel Export
+
+Use `--excel` to export results to an Excel `.xlsx` workbook:
+
+```bash
+# Export to auto-named file (derived from first input filename)
+polarwarp-rs --excel oplog.tsv.zst
+
+# Export to a specific file
+polarwarp-rs --excel=report.xlsx agent-1.tsv.zst agent-2.tsv.zst
+
+# Combine with other options
+polarwarp-rs --skip 90s --per-endpoint --excel=report.xlsx oplog.tsv.zst
+```
+
+### Workbook Structure
+
+Each workbook contains the following sheets:
+
+| Sheet | Contents |
+|-------|----------|
+| `<filename>-Results` | Full size-bucketed statistics table for one input file |
+| `<filename>-Detail` | Per-endpoint (or per-client) breakdown for one input file |
+| `Consolidated-Results` | Merged results across all files (only present when `>1` file is given) |
+| `Consolidated-Detail` | Merged per-endpoint breakdown (only when `>1` file is given) |
+
+Detail tabs contain three sections:
+- **Overall** — aggregate per-endpoint stats (all op types combined)
+- **META Operations** — per-endpoint stats for LIST/HEAD/DELETE/STAT
+- **GET Operations** — per-endpoint stats for GET
+- **PUT Operations** — per-endpoint stats for PUT
+
+### Worksheet Naming
+
+Sheet names are derived from the input filename by stripping any warp `[timestamp]` suffix and truncating to 20 characters. When multiple files share the same 20-character prefix, a numeric suffix (`-1`, `-2`, …) is appended to ensure unique names.
 
 ## File Formats
 

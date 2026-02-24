@@ -11,6 +11,7 @@ use clap::{Parser, ArgAction};
 use num_format::{Locale, ToFormattedString};
 use polars::prelude::*;
 use regex::Regex;
+use rust_xlsxwriter::{Format, Workbook};
 
 /// Number of size buckets (matching sai3-bench)
 const NUM_BUCKETS: usize = 9;
@@ -72,6 +73,13 @@ struct Args {
     /// Just print basic stats without full processing
     #[arg(long)]
     basic_stats: bool,
+
+    /// Export results to Excel file. Optionally specify output path with =.
+    /// --excel             derives name from input file (single) or polarwarp-results.xlsx
+    /// --excel=path.xlsx   writes to the specified path
+    #[arg(long, num_args = 0..=1, default_missing_value = "", require_equals = true,
+          value_name = "FILE")]
+    excel: Option<String>,
 }
 
 /// Parse skip time argument (e.g., "90s" or "5m") into nanoseconds
@@ -167,6 +175,15 @@ fn main() -> Result<()> {
     // Parse command line arguments
     let args = Args::parse();
 
+    // Resolve Excel output path early (before processing files)
+    let excel_path: Option<String> = args.excel.as_ref().map(|v| {
+        if v.is_empty() {
+            derive_excel_path(&args.files)
+        } else {
+            v.clone()
+        }
+    });
+
     // Parse skip time if provided
     let skip_nanos = if let Some(ref skip) = args.skip {
         let nanos = parse_skip_time(skip)?;
@@ -180,6 +197,9 @@ fn main() -> Result<()> {
     let mut all_dataframes: Vec<DataFrame> = Vec::new();
     let mut global_start_ns: Option<i64> = None;
     let mut global_end_ns: Option<i64> = None;
+
+    // Excel: per-file collected rows (main_rows, detail_rows, file_path)
+    let mut file_excel_data: Vec<(Vec<Vec<String>>, Vec<Vec<String>>, String)> = Vec::new();
 
     // Process each file
     for file_path in &args.files {
@@ -213,12 +233,24 @@ fn main() -> Result<()> {
 
         // Store the processed dataframe for consolidation
         if !args.basic_stats {
+            // Collect Excel rows if requested (must borrow df before moving it)
+            if excel_path.is_some() {
+                if let (Some(fs), Some(fe)) = (file_start_ns, file_end_ns) {
+                    let run_secs = (fe - fs) as f64 / 1_000_000_000.0;
+                    let (main_rows, detail_rows) =
+                        collect_stats_rows(&df, run_secs, args.per_client, args.per_endpoint)?;
+                    file_excel_data.push((main_rows, detail_rows, file_path.clone()));
+                }
+            }
             all_dataframes.push(df);
         }
 
         let elapsed = start.elapsed();
         println!("Processed file in {:.2?}", elapsed);
     }
+
+    // Excel: consolidated tab data (populated below if multiple files)
+    let mut consolidated_excel: Option<(Vec<Vec<String>>, Vec<Vec<String>>)> = None;
 
     // If we have multiple files, consolidate results
     if args.files.len() > 1 && !args.basic_stats {
@@ -240,8 +272,73 @@ fn main() -> Result<()> {
             
             // Compute and display consolidated stats
             compute_and_display_stats(&consolidated_df, run_time_secs, "Consolidated Results:", args.per_client, args.per_endpoint)?;
+
+            // Collect consolidated Excel rows if requested
+            if excel_path.is_some() {
+                let (main_rows, detail_rows) =
+                    collect_stats_rows(&consolidated_df, run_time_secs, args.per_client, args.per_endpoint)?;
+                consolidated_excel = Some((main_rows, detail_rows));
+            }
         } else {
             println!("No valid data to consolidate.");
+        }
+    }
+
+    // Write Excel file if requested
+    if let Some(ref path) = excel_path {
+        let mut tabs: Vec<(String, Vec<Vec<String>>)> = Vec::new();
+        let single = file_excel_data.len() == 1;
+
+        // Pre-compute unique short names to avoid worksheet name collisions when
+        // multiple files share the same prefix after truncation to 20 characters.
+        let short_names: Vec<String> = if single {
+            vec!["".to_string()]
+        } else {
+            let raw: Vec<String> = file_excel_data.iter()
+                .map(|(_, _, fp)| derive_short_name(fp))
+                .collect();
+            // Count how many times each derived name appears.
+            let mut tally: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for n in &raw { *tally.entry(n.clone()).or_insert(0) += 1; }
+            // For duplicates, append a 1-based counter suffix (-1, -2, …).
+            let mut seen: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            raw.iter().map(|n| {
+                if tally[n] > 1 {
+                    let counter = seen.entry(n.clone()).or_insert(1);
+                    let unique = format!("{}-{}", n, counter);
+                    *counter += 1;
+                    unique
+                } else {
+                    n.clone()
+                }
+            }).collect()
+        };
+
+        for (i, (main_rows, detail_rows, _fp)) in file_excel_data.iter().enumerate() {
+            let (results_tab, detail_tab) = if single {
+                ("Results".to_string(), "Detail".to_string())
+            } else {
+                let short = &short_names[i];
+                (make_tab_name(short, "Results"), make_tab_name(short, "Detail"))
+            };
+            tabs.push((results_tab, main_rows.clone()));
+            if !detail_rows.is_empty() {
+                tabs.push((detail_tab, detail_rows.clone()));
+            }
+        }
+
+        if let Some((main_rows, detail_rows)) = consolidated_excel {
+            tabs.push(("Consolidated".to_string(), main_rows));
+            if !detail_rows.is_empty() {
+                tabs.push(("Consol-Detail".to_string(), detail_rows));
+            }
+        }
+
+        if !tabs.is_empty() {
+            write_excel_workbook(path, &tabs)?;
+            println!("\nExcel file written: {}", path);
         }
     }
 
@@ -577,7 +674,7 @@ fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str, pe
         col("bytes").sum().cast(DataType::Float64).alias("bytes_sum"),
     ];
     if has_thread {
-        agg_exprs.push(col("thread").n_unique().alias("concurrency"));
+        agg_exprs.push(col("thread").n_unique().alias("max_threads"));
     }
 
     let stats = df.clone().lazy()
@@ -595,10 +692,10 @@ fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str, pe
     }
 
     // Print header
-    println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
-             "op", "bytes_bucket", "bucket_#", "concurrency",
+    println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9} {:>11} {:>9}",
+             "op", "bytes_bucket", "bucket_#",
              "mean_lat_us", "med._lat_us", "90%_lat_us",
-             "95%_lat_us", "99%_lat_us", "max_lat_us", "avg_obj_KB", "ops_/_sec", "xput_MBps", "count");
+             "95%_lat_us", "99%_lat_us", "max_lat_us", "avg_obj_KB", "ops_/_sec", "xput_MBps", "count", "max_threads", "runtime_s");
 
     // Extract columns
     let op_col         = stats.column("op")?.str()?;
@@ -613,7 +710,7 @@ fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str, pe
     let avg_kb         = stats.column("avg_obj_KB")?.f64()?;
     let count_col      = stats.column("count")?.u32()?;
     let bytes_sum_col  = stats.column("bytes_sum")?.f64()?;
-    let concurrency_col = if has_thread { Some(stats.column("concurrency")?.u32()?) } else { None };
+    let concurrency_col = if has_thread { Some(stats.column("max_threads")?.u32()?) } else { None };
 
     for i in 0..stats.height() {
         let op         = op_col.get(i).unwrap_or("?");
@@ -640,9 +737,8 @@ fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str, pe
         let ops = cnt as f64 / eff_time;
         let xp  = bsum / (1024.0 * 1024.0 * eff_time);
 
-        println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
+        println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9} {:>11} {:>9}",
                  op, bucket, bucket_num,
-                 format_int_with_commas(conc as i64),
                  format_with_commas(mean),
                  format_with_commas(med),
                  format_with_commas(p90),
@@ -652,7 +748,9 @@ fn compute_and_display_stats(df: &DataFrame, run_time_secs: f64, title: &str, pe
                  format_with_commas(avg),
                  format_with_commas(ops),
                  format_with_commas(xp),
-                 format_int_with_commas(cnt as i64));
+                 format_int_with_commas(cnt as i64),
+                 format_int_with_commas(conc as i64),
+                 format!("{:.1}", eff_time));
     }
 
     // Print summary rows for each operation category (META, GET, PUT)
@@ -1046,7 +1144,7 @@ fn compute_and_print_summary_row(
         col("bytes").sum().cast(DataType::Float64).alias("bytes_sum"),
     ];
     if has_thread {
-        select_exprs.push(col("thread").n_unique().alias("n_threads"));
+        select_exprs.push(col("thread").n_unique().alias("max_threads"));
     }
 
     let category_stats = df.clone().lazy()
@@ -1076,15 +1174,14 @@ fn compute_and_print_summary_row(
     let avg   = category_stats.column("avg_obj_KB")?.f64()?.get(0).unwrap_or(0.0);
     let bsum  = category_stats.column("bytes_sum")?.f64()?.get(0).unwrap_or(0.0);
     let n_thr: u32 = if has_thread {
-        category_stats.column("n_threads")?.u32()?.get(0).unwrap_or(0)
+        category_stats.column("max_threads")?.u32()?.get(0).unwrap_or(0)
     } else { 0 };
 
     let ops = count as f64 / eff_time;
     let xp  = bsum / (1024.0 * 1024.0 * eff_time);
 
-    println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9}",
+    println!("{:>8} {:>12} {:>8} {:>11} {:>11} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>9} {:>9} {:>11} {:>9}",
              category, "ALL", bucket_idx,
-             format_int_with_commas(n_thr as i64),
              format_with_commas(mean),
              format_with_commas(med),
              format_with_commas(p90),
@@ -1094,7 +1191,9 @@ fn compute_and_print_summary_row(
              format_with_commas(avg),
              format_with_commas(ops),
              format_with_commas(xp),
-             format_int_with_commas(count as i64));
+             format_int_with_commas(count as i64),
+             format_int_with_commas(n_thr as i64),
+             format!("{:.1}", eff_time));
 
     Ok(())
 }
@@ -1114,4 +1213,456 @@ fn print_basic_stats(df: &DataFrame) {
     println!("\nSample data (first 5 rows):");
     let sample = df.head(Some(5));
     println!("{}", sample);
+}
+
+// ─────────────────────────── Excel helpers ───────────────────────────────────
+
+/// Derive a short display name from a file path for use as an Excel tab prefix.
+/// Strips path, extensions (.zst, .csv, .tsv), and warp timestamp brackets.
+fn derive_short_name(file_path: &str) -> String {
+    let path = Path::new(file_path);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let name = name.strip_suffix(".zst").unwrap_or(name);
+    let name = name.strip_suffix(".csv").or_else(|| name.strip_suffix(".tsv")).unwrap_or(name);
+    // Strip warp-style [timestamp] and everything after
+    let name = if let Some(idx) = name.find('[') { &name[..idx] } else { name };
+    let name = name.trim_end_matches(['-', '_', '.']);
+    // Truncate to 20 chars to leave room for "-Results" / "-Detail" suffix
+    if name.len() > 20 { &name[..20] } else { name }.to_string()
+}
+
+/// Derive the Excel output path when --excel is given without an explicit name.
+/// Single file: same directory as input, same stem, .xlsx extension.
+/// Multiple files: "polarwarp-results.xlsx" in cwd.
+fn derive_excel_path(files: &[String]) -> String {
+    if files.len() == 1 {
+        let path = Path::new(&files[0]);
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("output");
+        let name = name.strip_suffix(".zst").unwrap_or(name);
+        let name = name.strip_suffix(".csv").or_else(|| name.strip_suffix(".tsv")).unwrap_or(name);
+        parent.join(format!("{}.xlsx", name)).to_string_lossy().into_owned()
+    } else {
+        "polarwarp-results.xlsx".to_string()
+    }
+}
+
+/// Build a valid Excel tab name (max 31 chars) from a base and suffix.
+fn make_tab_name(base: &str, suffix: &str) -> String {
+    let full = format!("{}-{}", base, suffix);
+    if full.len() <= 31 {
+        full
+    } else {
+        let max_base = 31usize.saturating_sub(suffix.len() + 1);
+        format!("{}-{}", &base[..max_base.min(base.len())], suffix)
+    }
+}
+
+/// Write an Excel workbook where each `(tab_name, rows)` element becomes one worksheet.
+/// The first row of each `rows` slice is treated as the header (bold).
+/// Numeric cell values are stored as numbers; others as strings.
+fn write_excel_workbook(path: &str, tabs: &[(String, Vec<Vec<String>>)]) -> Result<()> {
+    let mut workbook = Workbook::new();
+    let header_fmt = Format::new().set_bold().set_font_name("Aptos");
+    let data_fmt   = Format::new().set_font_name("Aptos");
+    let section_fmt = Format::new().set_bold().set_font_name("Aptos").set_font_size(11.0);
+
+    for (tab_name, rows) in tabs {
+        if rows.is_empty() {
+            continue;
+        }
+        let ws = workbook.add_worksheet();
+        ws.set_name(tab_name)?;
+
+        for (row_idx, row) in rows.iter().enumerate() {
+            // A row with one cell that starts with "===" or "---" is a section header
+            let is_section = row.len() == 1 &&
+                (row[0].starts_with("===") || row[0].starts_with("---"));
+
+            for (col_idx, cell) in row.iter().enumerate() {
+                let fmt = if row_idx == 0 || is_section {
+                    if is_section { &section_fmt } else { &header_fmt }
+                } else {
+                    &data_fmt
+                };
+                if let Ok(num) = cell.parse::<f64>() {
+                    ws.write_number_with_format(row_idx as u32, col_idx as u16, num, fmt)?;
+                } else {
+                    ws.write_string_with_format(row_idx as u32, col_idx as u16, cell, fmt)?;
+                }
+            }
+        }
+
+        // Set column widths based on max content length in each column
+        if let Some(header) = rows.first() {
+            for col_idx in 0..header.len() {
+                let max_len = rows.iter()
+                    .map(|r| r.get(col_idx).map_or(0, |c| c.len()))
+                    .max()
+                    .unwrap_or(10);
+                ws.set_column_width(col_idx as u16, (max_len as f64 + 2.0).min(35.0))?;
+            }
+        }
+    }
+
+    workbook.save(path).with_context(|| format!("Failed to save Excel file: {}", path))?;
+    Ok(())
+}
+
+// ─────────────────────────── Excel data collectors ───────────────────────────
+
+/// Collect main stats + detail rows for Excel without re-reading the file.
+/// Mirrors the query logic in `compute_and_display_stats` but returns rows instead of printing.
+/// Numbers are stored as plain "1234.56" strings (no commas) so the Excel writer
+/// can parse them as numeric values.
+fn collect_stats_rows(
+    df: &DataFrame,
+    run_time_secs: f64,
+    per_client: bool,
+    per_endpoint: bool,
+) -> Result<(Vec<Vec<String>>, Vec<Vec<String>>)> {
+    // Per-op effective time windows (issue #14)
+    let meta_time = compute_op_run_time(df, &META_OPS).unwrap_or(run_time_secs);
+    let get_time  = compute_op_run_time(df, &["GET"]).unwrap_or(run_time_secs);
+    let put_time  = compute_op_run_time(df, &["PUT"]).unwrap_or(run_time_secs);
+    let op_eff = |op: &str| -> f64 {
+        let t = if META_OPS.contains(&op) { meta_time }
+                else if op == "GET" { get_time }
+                else if op == "PUT" { put_time }
+                else { run_time_secs };
+        if t > 0.0 { t } else { run_time_secs }
+    };
+
+    let has_thread = df.column("thread").is_ok();
+
+    // Build per-bucket aggregation
+    let mut agg: Vec<Expr> = vec![
+        (col("duration_ns").mean() / lit(1000.0)).alias("mean"),
+        (col("duration_ns").median() / lit(1000.0)).alias("med"),
+        (col("duration_ns").quantile(lit(0.90), QuantileMethod::Linear) / lit(1000.0)).alias("p90"),
+        (col("duration_ns").quantile(lit(0.95), QuantileMethod::Linear) / lit(1000.0)).alias("p95"),
+        (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99"),
+        (col("duration_ns").max() / lit(1000.0)).alias("max"),
+        (col("bytes").mean() / lit(1024.0)).alias("avg"),
+        col("op").count().alias("count"),
+        col("bytes").sum().cast(DataType::Float64).alias("bsum"),
+    ];
+    if has_thread {
+        agg.push(col("thread").n_unique().alias("max_threads"));
+    }
+
+    let stats = df.clone().lazy()
+        .group_by([col("op"), col("bytes_bucket"), col("bucket_num")])
+        .agg(agg)
+        .sort(["bucket_num", "op"], SortMultipleOptions::default())
+        .collect()?;
+
+    let mut main_rows: Vec<Vec<String>> = Vec::new();
+
+    // Header row
+    main_rows.push(vec![
+        "op".into(), "bytes_bucket".into(), "bucket_#".into(),
+        "mean_lat_us".into(), "med._lat_us".into(), "90%_lat_us".into(),
+        "95%_lat_us".into(), "99%_lat_us".into(), "max_lat_us".into(),
+        "avg_obj_KB".into(), "ops_/_sec".into(), "xput_MBps".into(), "count".into(),
+        "max_threads".into(), "runtime_s".into(),
+    ]);
+
+    let op_c    = stats.column("op")?.str()?;
+    let bkt_c   = stats.column("bytes_bucket")?.str()?;
+    let bnum_c  = stats.column("bucket_num")?.i32()?;
+    let mean_c  = stats.column("mean")?.f64()?;
+    let med_c   = stats.column("med")?.f64()?;
+    let p90_c   = stats.column("p90")?.f64()?;
+    let p95_c   = stats.column("p95")?.f64()?;
+    let p99_c   = stats.column("p99")?.f64()?;
+    let max_c   = stats.column("max")?.f64()?;
+    let avg_c   = stats.column("avg")?.f64()?;
+    let cnt_c   = stats.column("count")?.u32()?;
+    let bsum_c  = stats.column("bsum")?.f64()?;
+    let conc_c  = if has_thread { Some(stats.column("max_threads")?.u32()?) } else { None };
+
+    for i in 0..stats.height() {
+        let cnt = cnt_c.get(i).unwrap_or(0);
+        if cnt == 0 { continue; }
+        let op   = op_c.get(i).unwrap_or("?");
+        let bsum = bsum_c.get(i).unwrap_or(0.0);
+        let eff  = op_eff(op);
+        main_rows.push(vec![
+            op.to_string(),
+            bkt_c.get(i).unwrap_or("?").to_string(),
+            bnum_c.get(i).unwrap_or(0).to_string(),
+            format!("{:.2}", mean_c.get(i).unwrap_or(0.0)),
+            format!("{:.2}", med_c.get(i).unwrap_or(0.0)),
+            format!("{:.2}", p90_c.get(i).unwrap_or(0.0)),
+            format!("{:.2}", p95_c.get(i).unwrap_or(0.0)),
+            format!("{:.2}", p99_c.get(i).unwrap_or(0.0)),
+            format!("{:.2}", max_c.get(i).unwrap_or(0.0)),
+            format!("{:.2}", avg_c.get(i).unwrap_or(0.0)),
+            format!("{:.2}", cnt as f64 / eff),
+            format!("{:.2}", bsum / (1024.0 * 1024.0 * eff)),
+            cnt.to_string(),
+            conc_c.as_ref().map_or(0, |c| c.get(i).unwrap_or(0)).to_string(),
+            format!("{:.1}", eff),
+        ]);
+    }
+
+    // Summary (ALL) rows for META / GET / PUT
+    for (category, ops_list, bucket_idx) in [
+        ("META", META_OPS.as_slice(), 97i32),
+        ("GET",  ["GET"].as_slice(),  98i32),
+        ("PUT",  ["PUT"].as_slice(),  99i32),
+    ] {
+        let mut filt = lit(false);
+        for op in ops_list { filt = filt.or(col("op").eq(lit(*op))); }
+
+        let mut sel: Vec<Expr> = vec![
+            (col("duration_ns").mean() / lit(1000.0)).alias("mean"),
+            (col("duration_ns").median() / lit(1000.0)).alias("med"),
+            (col("duration_ns").quantile(lit(0.90), QuantileMethod::Linear) / lit(1000.0)).alias("p90"),
+            (col("duration_ns").quantile(lit(0.95), QuantileMethod::Linear) / lit(1000.0)).alias("p95"),
+            (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99"),
+            (col("duration_ns").max() / lit(1000.0)).alias("max"),
+            (col("bytes").mean() / lit(1024.0)).alias("avg"),
+            col("op").count().alias("count"),
+            col("bytes").sum().cast(DataType::Float64).alias("bsum"),
+        ];
+        if has_thread { sel.push(col("thread").n_unique().alias("n_thr")); }
+
+        let cs = df.clone().lazy().filter(filt).select(sel).collect()?;
+        let cnt = cs.column("count")?.u32()?.get(0).unwrap_or(0);
+        if cnt == 0 { continue; }
+
+        let op_time = match category { "META" => meta_time, "GET" => get_time, "PUT" => put_time, _ => run_time_secs };
+        let eff = if op_time > 0.0 { op_time } else { run_time_secs };
+        let bsum  = cs.column("bsum")?.f64()?.get(0).unwrap_or(0.0);
+        let n_thr = if has_thread { cs.column("n_thr")?.u32()?.get(0).unwrap_or(0) } else { 0 };
+
+        main_rows.push(vec![
+            category.to_string(), "ALL".to_string(), bucket_idx.to_string(),
+            format!("{:.2}", cs.column("mean")?.f64()?.get(0).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("med")?.f64()?.get(0).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("p90")?.f64()?.get(0).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("p95")?.f64()?.get(0).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("p99")?.f64()?.get(0).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("max")?.f64()?.get(0).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("avg")?.f64()?.get(0).unwrap_or(0.0)),
+            format!("{:.2}", cnt as f64 / eff),
+            format!("{:.2}", bsum / (1024.0 * 1024.0 * eff)),
+            cnt.to_string(),
+            n_thr.to_string(),
+            format!("{:.1}", eff),
+        ]);
+    }
+
+    // Collect detail rows
+    let mut detail_rows: Vec<Vec<String>> = Vec::new();
+
+    if per_client && df.column("client_id").is_ok() {
+        let rows = collect_per_client_rows(df, run_time_secs)?;
+        if !rows.is_empty() {
+            detail_rows.extend(rows);
+        }
+    }
+
+    if per_endpoint && df.column("endpoint").is_ok() {
+        let rows = collect_per_endpoint_rows(df, run_time_secs)?;
+        if !rows.is_empty() {
+            if !detail_rows.is_empty() { detail_rows.push(vec![]); }
+            detail_rows.extend(rows);
+        }
+    }
+
+    Ok((main_rows, detail_rows))
+}
+
+/// Collect per-client statistics rows for Excel.
+fn collect_per_client_rows(df: &DataFrame, run_time_secs: f64) -> Result<Vec<Vec<String>>> {
+    if df.column("client_id").is_err() { return Ok(vec![]); }
+
+    let cs = df.clone().lazy()
+        .group_by([col("client_id")])
+        .agg([
+            (col("duration_ns").mean() / lit(1000.0)).alias("mean"),
+            (col("duration_ns").median() / lit(1000.0)).alias("med"),
+            (col("duration_ns").quantile(lit(0.90), QuantileMethod::Linear) / lit(1000.0)).alias("p90"),
+            (col("duration_ns").quantile(lit(0.95), QuantileMethod::Linear) / lit(1000.0)).alias("p95"),
+            (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99"),
+            (col("duration_ns").max() / lit(1000.0)).alias("max"),
+            (col("bytes").mean() / lit(1024.0)).alias("avg"),
+            (col("op").count().cast(DataType::Float64) / lit(run_time_secs)).alias("ops"),
+            ((col("bytes").sum().cast(DataType::Float64) / lit(1024.0 * 1024.0)) / lit(run_time_secs)).alias("xp"),
+            col("op").count().alias("count"),
+        ])
+        .sort(["client_id"], SortMultipleOptions::default())
+        .collect()?;
+
+    if cs.height() == 0 { return Ok(vec![]); }
+
+    let mut rows: Vec<Vec<String>> = vec![
+        vec!["=== Per-Client Statistics ===".into()],
+        vec!["client_id".into(), "mean_lat_us".into(), "med._lat_us".into(),
+             "90%_lat_us".into(), "95%_lat_us".into(), "99%_lat_us".into(),
+             "max_lat_us".into(), "avg_obj_KB".into(), "ops_/_sec".into(), "xput_MBps".into(), "count".into()],
+    ];
+
+    let cid = cs.column("client_id")?.str()?;
+    for i in 0..cs.height() {
+        rows.push(vec![
+            cid.get(i).unwrap_or("?").to_string(),
+            format!("{:.2}", cs.column("mean")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("med")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("p90")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("p95")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("p99")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("max")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("avg")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("ops")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", cs.column("xp")?.f64()?.get(i).unwrap_or(0.0)),
+            cs.column("count")?.u32()?.get(i).unwrap_or(0).to_string(),
+        ]);
+    }
+
+    // Per-op breakdowns
+    for (op_name, ops_list) in [
+        ("META", META_OPS.as_slice()),
+        ("GET",  ["GET"].as_slice()),
+        ("PUT",  ["PUT"].as_slice()),
+    ] {
+        let mut filt = lit(false);
+        for op in ops_list { filt = filt.or(col("op").eq(lit(*op))); }
+
+        let os = df.clone().lazy()
+            .filter(filt)
+            .group_by([col("client_id")])
+            .agg([
+                (col("duration_ns").mean() / lit(1000.0)).alias("mean"),
+                (col("duration_ns").median() / lit(1000.0)).alias("med"),
+                (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99"),
+                (col("op").count().cast(DataType::Float64) / lit(run_time_secs)).alias("ops"),
+                ((col("bytes").sum().cast(DataType::Float64) / lit(1024.0 * 1024.0)) / lit(run_time_secs)).alias("xp"),
+                col("op").count().alias("count"),
+            ])
+            .sort(["client_id"], SortMultipleOptions::default())
+            .collect()?;
+
+        if os.height() == 0 { continue; }
+
+        rows.push(vec![]);
+        rows.push(vec![format!("--- {} Operations ---", op_name)]);
+        rows.push(vec!["client_id".into(), "mean_lat_us".into(), "med._lat_us".into(),
+                        "99%_lat_us".into(), "ops_/_sec".into(), "xput_MBps".into(), "count".into()]);
+
+        let cid = os.column("client_id")?.str()?;
+        for i in 0..os.height() {
+            rows.push(vec![
+                cid.get(i).unwrap_or("?").to_string(),
+                format!("{:.2}", os.column("mean")?.f64()?.get(i).unwrap_or(0.0)),
+                format!("{:.2}", os.column("med")?.f64()?.get(i).unwrap_or(0.0)),
+                format!("{:.2}", os.column("p99")?.f64()?.get(i).unwrap_or(0.0)),
+                format!("{:.2}", os.column("ops")?.f64()?.get(i).unwrap_or(0.0)),
+                format!("{:.2}", os.column("xp")?.f64()?.get(i).unwrap_or(0.0)),
+                os.column("count")?.u32()?.get(i).unwrap_or(0).to_string(),
+            ]);
+        }
+    }
+
+    Ok(rows)
+}
+
+/// Collect per-endpoint statistics rows for Excel.
+fn collect_per_endpoint_rows(df: &DataFrame, run_time_secs: f64) -> Result<Vec<Vec<String>>> {
+    if df.column("endpoint").is_err() { return Ok(vec![]); }
+
+    let es = df.clone().lazy()
+        .filter(col("endpoint").is_not_null())
+        .group_by([col("endpoint")])
+        .agg([
+            (col("duration_ns").mean() / lit(1000.0)).alias("mean"),
+            (col("duration_ns").median() / lit(1000.0)).alias("med"),
+            (col("duration_ns").quantile(lit(0.90), QuantileMethod::Linear) / lit(1000.0)).alias("p90"),
+            (col("duration_ns").quantile(lit(0.95), QuantileMethod::Linear) / lit(1000.0)).alias("p95"),
+            (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99"),
+            (col("duration_ns").max() / lit(1000.0)).alias("max"),
+            (col("bytes").mean() / lit(1024.0)).alias("avg"),
+            (col("op").count().cast(DataType::Float64) / lit(run_time_secs)).alias("ops"),
+            ((col("bytes").sum().cast(DataType::Float64) / lit(1024.0 * 1024.0)) / lit(run_time_secs)).alias("xp"),
+            col("op").count().alias("count"),
+        ])
+        .filter(col("count").gt(lit(0u32)))
+        .sort(["endpoint"], SortMultipleOptions::default())
+        .collect()?;
+
+    if es.height() == 0 { return Ok(vec![]); }
+
+    let mut rows: Vec<Vec<String>> = vec![
+        vec!["=== Per-Endpoint Statistics ===".into()],
+        vec!["endpoint".into(), "mean_lat_us".into(), "med._lat_us".into(),
+             "90%_lat_us".into(), "95%_lat_us".into(), "99%_lat_us".into(),
+             "max_lat_us".into(), "avg_obj_KB".into(), "ops_/_sec".into(), "xput_MBps".into(), "count".into()],
+    ];
+
+    let ep = es.column("endpoint")?.str()?;
+    for i in 0..es.height() {
+        rows.push(vec![
+            ep.get(i).unwrap_or("?").to_string(),
+            format!("{:.2}", es.column("mean")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", es.column("med")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", es.column("p90")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", es.column("p95")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", es.column("p99")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", es.column("max")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", es.column("avg")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", es.column("ops")?.f64()?.get(i).unwrap_or(0.0)),
+            format!("{:.2}", es.column("xp")?.f64()?.get(i).unwrap_or(0.0)),
+            es.column("count")?.u32()?.get(i).unwrap_or(0).to_string(),
+        ]);
+    }
+
+    // Per-op breakdowns
+    for (op_name, ops_list) in [
+        ("META", META_OPS.as_slice()),
+        ("GET",  ["GET"].as_slice()),
+        ("PUT",  ["PUT"].as_slice()),
+    ] {
+        let mut filt = lit(false);
+        for op in ops_list { filt = filt.or(col("op").eq(lit(*op))); }
+
+        let os = df.clone().lazy()
+            .filter(filt.and(col("endpoint").is_not_null()))
+            .group_by([col("endpoint")])
+            .agg([
+                (col("duration_ns").mean() / lit(1000.0)).alias("mean"),
+                (col("duration_ns").median() / lit(1000.0)).alias("med"),
+                (col("duration_ns").quantile(lit(0.99), QuantileMethod::Linear) / lit(1000.0)).alias("p99"),
+                (col("op").count().cast(DataType::Float64) / lit(run_time_secs)).alias("ops"),
+                ((col("bytes").sum().cast(DataType::Float64) / lit(1024.0 * 1024.0)) / lit(run_time_secs)).alias("xp"),
+                col("op").count().alias("count"),
+            ])
+            .filter(col("count").gt(lit(0u32)))
+            .sort(["endpoint"], SortMultipleOptions::default())
+            .collect()?;
+
+        if os.height() == 0 { continue; }
+
+        rows.push(vec![]);
+        rows.push(vec![format!("--- {} Operations ---", op_name)]);
+        rows.push(vec!["endpoint".into(), "mean_lat_us".into(), "med._lat_us".into(),
+                        "99%_lat_us".into(), "ops_/_sec".into(), "xput_MBps".into(), "count".into()]);
+
+        let ep = os.column("endpoint")?.str()?;
+        for i in 0..os.height() {
+            rows.push(vec![
+                ep.get(i).unwrap_or("?").to_string(),
+                format!("{:.2}", os.column("mean")?.f64()?.get(i).unwrap_or(0.0)),
+                format!("{:.2}", os.column("med")?.f64()?.get(i).unwrap_or(0.0)),
+                format!("{:.2}", os.column("p99")?.f64()?.get(i).unwrap_or(0.0)),
+                format!("{:.2}", os.column("ops")?.f64()?.get(i).unwrap_or(0.0)),
+                format!("{:.2}", os.column("xp")?.f64()?.get(i).unwrap_or(0.0)),
+                os.column("count")?.u32()?.get(i).unwrap_or(0).to_string(),
+            ]);
+        }
+    }
+
+    Ok(rows)
 }

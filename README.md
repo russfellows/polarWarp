@@ -1,6 +1,6 @@
 # PolarWarp
 
-[![Version](https://img.shields.io/badge/version-0.1.4-brightgreen.svg)](https://github.com/russfellows/polarWarp/releases)
+[![Version](https://img.shields.io/badge/version-0.1.5-brightgreen.svg)](https://github.com/russfellows/polarWarp/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](python/)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](rust/)
@@ -13,6 +13,8 @@ High-performance tool for analyzing storage I/O operation logs (oplog files from
 - **Size-bucketed analysis**: 9 size buckets (zero, 1B-8KiB, ... >2GiB)
 - **Summary rows**: Aggregate statistics for META (LIST/HEAD/DELETE/STAT), GET, and PUT operations
 - **Per-client statistics**: Compare performance across multiple clients with `--per-client` option
+- **Per-endpoint statistics**: Compare performance across storage endpoints with `--per-endpoint` option
+- **Excel export**: Export results to a formatted `.xlsx` workbook with `--excel` option
 - **Latency percentiles**: mean, median, p90, p95, p99, max (statistically valid)
 - **Throughput metrics**: ops/sec and MiB/sec per bucket
 - **Multi-file consolidation**: Combine results from multiple agents
@@ -98,6 +100,12 @@ cargo build --release
 
 # Compare performance across multiple clients
 ./target/release/polarwarp-rs --per-client oplog.tsv.zst
+
+# Export results to Excel
+./target/release/polarwarp-rs --excel oplog.tsv.zst
+
+# Per-endpoint breakdown
+./target/release/polarwarp-rs --per-endpoint oplog.tsv.zst
 ```
 
 ### Quick Start - Python
@@ -111,6 +119,12 @@ uv run ./polarwarp.py --skip=90s oplog.csv.zst
 
 # Compare performance across multiple clients
 uv run ./polarwarp.py --per-client oplog.csv.zst
+
+# Export results to Excel
+uv run ./polarwarp.py --excel oplog.csv.zst
+
+# Per-endpoint breakdown
+uv run ./polarwarp.py --per-endpoint oplog.csv.zst
 ```
 
 ## Output Format
@@ -118,9 +132,9 @@ uv run ./polarwarp.py --per-client oplog.csv.zst
 Both implementations produce identical output:
 
 ```
-      op bytes_bucket bucket_# mean_lat_us med._lat_us 90%_lat_us 95%_lat_us 99%_lat_us max_lat_us avg_obj_KB ops_/_sec xput_MBps     count
-    LIST         zero        0      533.98      533.98     533.98     533.98     533.98     533.98       0.00      0.20      0.00         1
-     GET      1B-8KiB        1       76.18       71.97     114.27     128.50     160.82   1,173.53       4.00 47,394.46    185.13   236,971
+      op bytes_bucket bucket_# mean_lat_us med._lat_us 90%_lat_us 95%_lat_us 99%_lat_us max_lat_us avg_obj_KB ops_/_sec xput_MBps     count max_threads runtime_s
+    LIST         zero        0      533.98      533.98     533.98     533.98     533.98     533.98       0.00      0.20      0.00         1           1      5.00
+     GET      1B-8KiB        1       76.18       71.97     114.27     128.50     160.82   1,173.53       4.00 47,394.46    185.13   236,971           8      5.00
 ```
 
 ## Per-Client Statistics
@@ -193,6 +207,10 @@ Also supports MinIO Warp CSV output format.
 
 - **[sai3-bench](https://github.com/russfellows/sai3-bench)** - Multi-protocol I/O benchmarking suite
 - **[MinIO Warp](https://github.com/minio/warp)** - S3 benchmarking tool
+
+## Changelog
+
+See [Changelog.md](Changelog.md) for a detailed history of changes.
 
 ## License
 

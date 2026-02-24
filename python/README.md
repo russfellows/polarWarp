@@ -42,6 +42,12 @@ uv run ./polarwarp.py --skip=2m oplog.csv.zst
 
 # Compare performance across multiple clients
 uv run ./polarwarp.py --per-client multi_client_oplog.csv.zst
+
+# Export results to Excel
+uv run ./polarwarp.py --excel report.xlsx oplog.csv.zst
+
+# Per-endpoint breakdown
+uv run ./polarwarp.py --per-endpoint oplog.csv.zst
 ```
 
 ## Command Line Options
@@ -51,6 +57,8 @@ uv run ./polarwarp.py --per-client multi_client_oplog.csv.zst
 | `<FILES>...` | Input files to process (CSV/TSV, optionally zstd compressed) |
 | `--skip=<TIME>` | Skip warmup time from start (e.g., "90s", "5m") |
 | `--per-client` | Generate per-client statistics (in addition to overall stats) |
+| `--per-endpoint` | Generate per-endpoint statistics (in addition to overall stats) |
+| `--excel [=FILE]` | Export results to an Excel `.xlsx` workbook |
 | `--help` | Display help information |
 
 ## Performance

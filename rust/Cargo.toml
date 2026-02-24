@@ -1,6 +1,6 @@
 [package]
 name = "polarwarp-rs"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["Russ Fellows <russ.fellows@gmail.com>"]
 description = "A Rust implementation of polarWarp for processing oplog files"
@@ -16,6 +16,7 @@ zstd = "0.13.3"
 anyhow = "1.0.100"
 num-format = "0.4.4"
 regex = "1.12.2"
+rust_xlsxwriter = "^0.79"  # Excel file generation
 
 [profile.release]
 lto = true

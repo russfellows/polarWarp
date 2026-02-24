@@ -13,6 +13,12 @@ use polars::prelude::*;
 use regex::Regex;
 use rust_xlsxwriter::{Format, Workbook};
 
+/// Rows for one Excel results tab and one detail tab: (results_rows, detail_rows)
+type ExcelTabRows = (Vec<Vec<String>>, Vec<Vec<String>>);
+
+/// Per-file Excel data collected before writing: (results_rows, detail_rows, file_path)
+type FileExcelEntry = (Vec<Vec<String>>, Vec<Vec<String>>, String);
+
 /// Number of size buckets (matching sai3-bench)
 const NUM_BUCKETS: usize = 9;
 
@@ -199,7 +205,7 @@ fn main() -> Result<()> {
     let mut global_end_ns: Option<i64> = None;
 
     // Excel: per-file collected rows (main_rows, detail_rows, file_path)
-    let mut file_excel_data: Vec<(Vec<Vec<String>>, Vec<Vec<String>>, String)> = Vec::new();
+    let mut file_excel_data: Vec<FileExcelEntry> = Vec::new();
 
     // Process each file
     for file_path in &args.files {
@@ -250,7 +256,7 @@ fn main() -> Result<()> {
     }
 
     // Excel: consolidated tab data (populated below if multiple files)
-    let mut consolidated_excel: Option<(Vec<Vec<String>>, Vec<Vec<String>>)> = None;
+    let mut consolidated_excel: Option<ExcelTabRows> = None;
 
     // If we have multiple files, consolidate results
     if args.files.len() > 1 && !args.basic_stats {
@@ -1320,7 +1326,7 @@ fn collect_stats_rows(
     run_time_secs: f64,
     per_client: bool,
     per_endpoint: bool,
-) -> Result<(Vec<Vec<String>>, Vec<Vec<String>>)> {
+) -> Result<ExcelTabRows> {
     // Per-op effective time windows (issue #14)
     let meta_time = compute_op_run_time(df, &META_OPS).unwrap_or(run_time_secs);
     let get_time  = compute_op_run_time(df, &["GET"]).unwrap_or(run_time_secs);

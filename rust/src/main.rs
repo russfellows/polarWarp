@@ -19,6 +19,15 @@ type ExcelTabRows = (Vec<Vec<String>>, Vec<Vec<String>>);
 /// Per-file Excel data collected before writing: (results_rows, detail_rows, file_path)
 type FileExcelEntry = (Vec<Vec<String>>, Vec<Vec<String>>, String);
 
+/// Detected format of an input file.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FileType {
+    /// Per-operation trace: columns include duration_ns, bytes, client_id, …
+    Trace,
+    /// Aggregated time-series summary: columns are op, start, end, bps, ops_per_sec, errors
+    Summary,
+}
+
 /// Number of size buckets (matching sai3-bench)
 const NUM_BUCKETS: usize = 9;
 
@@ -167,6 +176,56 @@ fn detect_separator(file_path: &str) -> Result<u8> {
     }
 }
 
+/// Read the first non-empty, non-comment header line from a (possibly zstd) file.
+fn read_header_line(file_path: &str) -> Result<String> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let file = File::open(file_path)
+        .with_context(|| format!("Failed to open file: {}", file_path))?;
+
+    let read_first_non_comment = |reader: &mut dyn BufRead| -> Result<String> {
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 {
+                anyhow::bail!("File '{}' has no header row", file_path);
+            }
+            let trimmed = line.trim().to_string();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                return Ok(trimmed);
+            }
+        }
+    };
+
+    if file_path.ends_with(".zst") {
+        let decoder = zstd::stream::read::Decoder::new(file)
+            .with_context(|| format!("Failed to decompress zstd file: {}", file_path))?;
+        let mut reader = BufReader::new(decoder);
+        read_first_non_comment(&mut reader)
+    } else {
+        let mut reader = BufReader::new(file);
+        read_first_non_comment(&mut reader)
+    }
+}
+
+/// Detect whether a file is a per-op trace or an aggregated summary,
+/// by inspecting the header columns.
+fn detect_file_type(file_path: &str) -> Result<FileType> {
+    let header = read_header_line(file_path)?;
+    let cols: Vec<&str> = header.split('\t').collect();
+    if cols.contains(&"bps") && cols.contains(&"ops_per_sec") {
+        Ok(FileType::Summary)
+    } else if cols.contains(&"duration_ns") {
+        Ok(FileType::Trace)
+    } else {
+        anyhow::bail!(
+            "File '{}' has unrecognized header columns: {}\n\
+             Expected either trace columns (duration_ns, …) or summary columns (bps, ops_per_sec, …)",
+            file_path, header
+        )
+    }
+}
+
 /// Format a number with commas for readability
 fn format_with_commas(value: f64) -> String {
     if value.is_nan() || value.is_infinite() {
@@ -220,11 +279,38 @@ fn main() -> Result<()> {
     // Excel: per-file collected rows (main_rows, detail_rows, file_path)
     let mut file_excel_data: Vec<FileExcelEntry> = Vec::new();
 
+    // Summary-file Excel rows collected separately (one entry per file)
+    let mut summary_excel_data: Vec<(Vec<Vec<String>>, String)> = Vec::new();
+    let mut any_summary_file = false;
+    let mut any_trace_file = false;
+
     // Process each file
     for file_path in &args.files {
         println!("\nProcessing file: {}", file_path);
 
         let start = Instant::now();
+
+        // Detect file type and route to the appropriate handler
+        let file_type = detect_file_type(file_path)?;
+
+        match file_type {
+            FileType::Summary => {
+                any_summary_file = true;
+                println!("Summary Statistics for: {}", file_path);
+                let (df, _, _) = process_summary_file(file_path)?;
+                if excel_path.is_some() {
+                    let rows = collect_summary_excel_rows(&df)?;
+                    summary_excel_data.push((rows, file_path.clone()));
+                }
+                let elapsed = start.elapsed();
+                println!("Processed file in {:.2?}", elapsed);
+                // Do not push to all_dataframes — summary rows are not per-op trace rows
+                continue;
+            }
+            FileType::Trace => {
+                any_trace_file = true;
+            }
+        }
 
         // Read and process the file
         let (df, file_start_ns, file_end_ns) = process_file(
@@ -260,6 +346,14 @@ fn main() -> Result<()> {
 
         let elapsed = start.elapsed();
         println!("Processed file in {:.2?}", elapsed);
+    }
+
+    // Warn if the user mixed trace and summary files in one invocation
+    if any_trace_file && any_summary_file {
+        eprintln!(
+            "WARNING: Mixed trace and summary files provided.  \
+             Consolidation is skipped for summary files; each is reported independently."
+        );
     }
 
     // Excel: consolidated tab data (populated below if multiple files)
@@ -395,6 +489,13 @@ fn main() -> Result<()> {
             if !detail_rows.is_empty() {
                 tabs.push(("Consol-Detail".to_string(), detail_rows));
             }
+        }
+
+        // Add one tab per summary file
+        for (rows, fp) in &summary_excel_data {
+            let short = derive_short_name(fp);
+            let tab_name = make_tab_name(&short, "Summary");
+            tabs.push((tab_name, rows.clone()));
         }
 
         if !tabs.is_empty() {
@@ -1288,7 +1389,279 @@ fn print_basic_stats(df: &DataFrame) {
     println!("{}", sample);
 }
 
-// ─────────────────────────── Excel helpers ───────────────────────────────────
+// ─────────────────────────── Summary file support ───────────────────────────
+
+/// Read an aggregated summary file (.summary.tsv.zst) into a DataFrame.
+/// Validates required columns, parses start/end timestamps to start_ns/end_ns.
+fn read_summary_file(file_path: &str) -> Result<DataFrame> {
+    let path = Path::new(file_path);
+    if !path.exists() {
+        anyhow::bail!("File not found: {}", file_path);
+    }
+
+    let parse_options = CsvParseOptions::default()
+        .with_separator(b'\t')
+        .with_try_parse_dates(false)
+        .with_missing_is_null(true)
+        .with_comment_prefix::<&str>(Some("#"))
+        .with_truncate_ragged_lines(true);
+
+    let read_options = CsvReadOptions::default()
+        .with_parse_options(parse_options)
+        .with_ignore_errors(true)
+        .with_has_header(true);
+
+    let df = read_options
+        .try_into_reader_with_file_path(Some(path.to_path_buf()))?
+        .finish()
+        .with_context(|| format!("Failed to read summary file '{}'", file_path))?;
+
+    if df.height() == 0 {
+        anyhow::bail!("Summary file '{}' contains no data rows", file_path);
+    }
+
+    let required = ["op", "start", "end", "bps", "ops_per_sec", "errors"];
+    let cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let missing: Vec<&str> = required.iter()
+        .filter(|c| !cols.contains(&c.to_string()))
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "Summary file '{}' is missing required columns: {}",
+            file_path, missing.join(", ")
+        );
+    }
+
+    // Parse start/end to nanosecond timestamps for time-range computation
+    let df = df.lazy()
+        .with_columns([
+            col("start")
+                .str().replace(lit("Z$"), lit("+00:00"), false)
+                .str().to_datetime(
+                    Some(TimeUnit::Nanoseconds),
+                    None,
+                    StrptimeOptions {
+                        format: Some("%Y-%m-%dT%H:%M:%S%.f%z".into()),
+                        strict: false,
+                        exact: false,
+                        cache: true,
+                    },
+                    lit("raise"),
+                )
+                .dt().timestamp(TimeUnit::Nanoseconds)
+                .alias("start_ns"),
+            col("end")
+                .str().replace(lit("Z$"), lit("+00:00"), false)
+                .str().to_datetime(
+                    Some(TimeUnit::Nanoseconds),
+                    None,
+                    StrptimeOptions {
+                        format: Some("%Y-%m-%dT%H:%M:%S%.f%z".into()),
+                        strict: false,
+                        exact: false,
+                        cache: true,
+                    },
+                    lit("raise"),
+                )
+                .dt().timestamp(TimeUnit::Nanoseconds)
+                .alias("end_ns"),
+            // Ensure bps is f64 (may be read as i64 if all values are whole numbers)
+            col("bps").cast(DataType::Float64),
+            col("ops_per_sec").cast(DataType::Float64),
+        ])
+        .collect()?;
+
+    Ok(df)
+}
+
+/// Process a single summary file: read, display stats, return (df, start_ns, end_ns).
+fn process_summary_file(file_path: &str) -> Result<(DataFrame, i64, i64)> {
+    let df = read_summary_file(file_path)?;
+
+    // Derive time range from start_ns / end_ns columns
+    let start_ns = df.column("start_ns")?.i64()?.into_iter().flatten().next()
+        .context("Could not determine start time from summary file")?;
+    let end_ns = df.column("end_ns")?.i64()?.into_iter().flatten().last()
+        .context("Could not determine end time from summary file")?;
+
+    let seg_count = df.height();
+    let duration_secs = (end_ns - start_ns) as f64 / 1_000_000_000.0;
+    println!("Time range: {} seconds  ({} segments)", duration_secs as i64, seg_count);
+
+    compute_and_display_summary_stats(&df)?;
+
+    Ok((df, start_ns, end_ns))
+}
+
+/// Compute and display per-op throughput variability statistics from a summary DataFrame.
+/// Columns: op, bps, ops_per_sec, errors  (plus start_ns/end_ns)
+fn compute_and_display_summary_stats(df: &DataFrame) -> Result<()> {
+    let stats = df.clone().lazy()
+        .group_by([col("op")])
+        .agg([
+            col("bps").count().alias("segments"),
+            (col("bps").mean()     / lit(1_048_576.0)).alias("mean_MBps"),
+            (col("bps").median()   / lit(1_048_576.0)).alias("p50_MBps"),
+            (col("bps").quantile(lit(0.90), QuantileMethod::Linear) / lit(1_048_576.0)).alias("p90_MBps"),
+            (col("bps").quantile(lit(0.99), QuantileMethod::Linear) / lit(1_048_576.0)).alias("p99_MBps"),
+            (col("bps").min()      / lit(1_048_576.0)).alias("min_MBps"),
+            (col("bps").max()      / lit(1_048_576.0)).alias("max_MBps"),
+            (col("bps").std(1)     / lit(1_048_576.0)).alias("stdev_MBps"),
+            col("ops_per_sec").mean().alias("mean_ops"),
+            col("ops_per_sec").median().alias("p50_ops"),
+            col("ops_per_sec").quantile(lit(0.99), QuantileMethod::Linear).alias("p99_ops"),
+            col("errors").cast(DataType::Int64).sum().alias("total_errors"),
+        ])
+        // Sort: TOTAL last, everything else alphabetical
+        .sort(
+            ["op"],
+            SortMultipleOptions::default(),
+        )
+        .collect()?;
+
+    if stats.height() == 0 {
+        println!("  (no data)");
+        return Ok(());
+    }
+
+    println!(
+        "{:>8} {:>6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>13}",
+        "op", "segs",
+        "mean_MBps", "p50_MBps", "p90_MBps", "p99_MBps",
+        "min_MBps", "max_MBps", "stdev_MBps",
+        "mean_ops/s", "p50_ops/s", "p99_ops/s",
+        "total_errors"
+    );
+
+    let op_col     = stats.column("op")?.str()?;
+    let segs_col   = stats.column("segments")?.u32()?;
+    let mean_col   = stats.column("mean_MBps")?.f64()?;
+    let p50_col    = stats.column("p50_MBps")?.f64()?;
+    let p90_col    = stats.column("p90_MBps")?.f64()?;
+    let p99_col    = stats.column("p99_MBps")?.f64()?;
+    let min_col    = stats.column("min_MBps")?.f64()?;
+    let max_col    = stats.column("max_MBps")?.f64()?;
+    let stdev_col  = stats.column("stdev_MBps")?.f64()?;
+    let mops_col   = stats.column("mean_ops")?.f64()?;
+    let p50ops_col = stats.column("p50_ops")?.f64()?;
+    let p99ops_col = stats.column("p99_ops")?.f64()?;
+    let errs_col   = stats.column("total_errors")?.i64()?;
+
+    // Print non-TOTAL rows first, then TOTAL
+    let height = stats.height();
+    let print_row = |i: usize| {
+        let op    = op_col.get(i).unwrap_or("?");
+        let segs  = segs_col.get(i).unwrap_or(0);
+        let mean  = mean_col.get(i).unwrap_or(0.0);
+        let p50   = p50_col.get(i).unwrap_or(0.0);
+        let p90   = p90_col.get(i).unwrap_or(0.0);
+        let p99   = p99_col.get(i).unwrap_or(0.0);
+        let min   = min_col.get(i).unwrap_or(0.0);
+        let max   = max_col.get(i).unwrap_or(0.0);
+        let std   = stdev_col.get(i).unwrap_or(0.0);
+        let mops  = mops_col.get(i).unwrap_or(0.0);
+        let p50op = p50ops_col.get(i).unwrap_or(0.0);
+        let p99op = p99ops_col.get(i).unwrap_or(0.0);
+        let errs  = errs_col.get(i).unwrap_or(0);
+        println!(
+            "{:>8} {:>6} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>13}",
+            op, segs,
+            format_with_commas(mean), format_with_commas(p50),
+            format_with_commas(p90),  format_with_commas(p99),
+            format_with_commas(min),  format_with_commas(max),
+            format_with_commas(std),
+            format_with_commas(mops), format_with_commas(p50op), format_with_commas(p99op),
+            format_int_with_commas(errs),
+        );
+    };
+
+    for i in 0..height {
+        if op_col.get(i).unwrap_or("") != "TOTAL" {
+            print_row(i);
+        }
+    }
+    // Print TOTAL row last
+    for i in 0..height {
+        if op_col.get(i).unwrap_or("") == "TOTAL" {
+            print_row(i);
+        }
+    }
+
+    Ok(())
+}
+
+/// Collect summary stats rows for Excel export (header + data rows, no commas in numbers).
+fn collect_summary_excel_rows(df: &DataFrame) -> Result<Vec<Vec<String>>> {
+    let stats = df.clone().lazy()
+        .group_by([col("op")])
+        .agg([
+            col("bps").count().alias("segments"),
+            (col("bps").mean()     / lit(1_048_576.0)).alias("mean_MBps"),
+            (col("bps").median()   / lit(1_048_576.0)).alias("p50_MBps"),
+            (col("bps").quantile(lit(0.90), QuantileMethod::Linear) / lit(1_048_576.0)).alias("p90_MBps"),
+            (col("bps").quantile(lit(0.99), QuantileMethod::Linear) / lit(1_048_576.0)).alias("p99_MBps"),
+            (col("bps").min()      / lit(1_048_576.0)).alias("min_MBps"),
+            (col("bps").max()      / lit(1_048_576.0)).alias("max_MBps"),
+            (col("bps").std(1)     / lit(1_048_576.0)).alias("stdev_MBps"),
+            col("ops_per_sec").mean().alias("mean_ops"),
+            col("ops_per_sec").median().alias("p50_ops"),
+            col("ops_per_sec").quantile(lit(0.99), QuantileMethod::Linear).alias("p99_ops"),
+            col("errors").cast(DataType::Int64).sum().alias("total_errors"),
+        ])
+        .sort(["op"], SortMultipleOptions::default())
+        .collect()?;
+
+    let mut rows: Vec<Vec<String>> = vec![vec![
+        "op".into(), "segments".into(),
+        "mean_MBps".into(), "p50_MBps".into(), "p90_MBps".into(), "p99_MBps".into(),
+        "min_MBps".into(), "max_MBps".into(), "stdev_MBps".into(),
+        "mean_ops/s".into(), "p50_ops/s".into(), "p99_ops/s".into(),
+        "total_errors".into(),
+    ]];
+
+    let op_col     = stats.column("op")?.str()?;
+    let segs_col   = stats.column("segments")?.u32()?;
+    let mean_col   = stats.column("mean_MBps")?.f64()?;
+    let p50_col    = stats.column("p50_MBps")?.f64()?;
+    let p90_col    = stats.column("p90_MBps")?.f64()?;
+    let p99_col    = stats.column("p99_MBps")?.f64()?;
+    let min_col    = stats.column("min_MBps")?.f64()?;
+    let max_col    = stats.column("max_MBps")?.f64()?;
+    let stdev_col  = stats.column("stdev_MBps")?.f64()?;
+    let mops_col   = stats.column("mean_ops")?.f64()?;
+    let p50ops_col = stats.column("p50_ops")?.f64()?;
+    let p99ops_col = stats.column("p99_ops")?.f64()?;
+    let errs_col   = stats.column("total_errors")?.i64()?;
+
+    // Non-TOTAL rows first, then TOTAL
+    let height = stats.height();
+    let push_row = |rows: &mut Vec<Vec<String>>, i: usize| {
+        rows.push(vec![
+            op_col.get(i).unwrap_or("?").to_string(),
+            segs_col.get(i).unwrap_or(0).to_string(),
+            format!("{:.2}", mean_col.get(i).unwrap_or(0.0)),
+            format!("{:.2}", p50_col.get(i).unwrap_or(0.0)),
+            format!("{:.2}", p90_col.get(i).unwrap_or(0.0)),
+            format!("{:.2}", p99_col.get(i).unwrap_or(0.0)),
+            format!("{:.2}", min_col.get(i).unwrap_or(0.0)),
+            format!("{:.2}", max_col.get(i).unwrap_or(0.0)),
+            format!("{:.2}", stdev_col.get(i).unwrap_or(0.0)),
+            format!("{:.2}", mops_col.get(i).unwrap_or(0.0)),
+            format!("{:.2}", p50ops_col.get(i).unwrap_or(0.0)),
+            format!("{:.2}", p99ops_col.get(i).unwrap_or(0.0)),
+            errs_col.get(i).unwrap_or(0).to_string(),
+        ]);
+    };
+    for i in 0..height {
+        if op_col.get(i).unwrap_or("") != "TOTAL" { push_row(&mut rows, i); }
+    }
+    for i in 0..height {
+        if op_col.get(i).unwrap_or("") == "TOTAL" { push_row(&mut rows, i); }
+    }
+
+    Ok(rows)
+}
 
 /// Derive a short display name from a file path for use as an Excel tab prefix.
 /// Strips path, extensions (.zst, .csv, .tsv), and warp timestamp brackets.

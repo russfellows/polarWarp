@@ -1,5 +1,6 @@
 # PolarWarp - Python Implementation
 
+[![Version](https://img.shields.io/badge/version-0.1.7-brightgreen.svg)](../Changelog.md)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](../LICENSE)
 
@@ -31,23 +32,26 @@ pip install -e .
 # Display help
 uv run ./polarwarp.py --help
 
-# Process a single file
-uv run ./polarwarp.py oplog.csv.zst
+# Process a single trace file
+uv run ./polarwarp.py oplog.trace.tsv.zst
 
 # Process multiple files (results are consolidated)
-uv run ./polarwarp.py agent-1.csv.zst agent-2.csv.zst
+uv run ./polarwarp.py agent-1.trace.tsv.zst agent-2.trace.tsv.zst
+
+# Process a summary file (type is auto-detected from header)
+uv run ./polarwarp.py run.summary.tsv.zst
 
 # Skip first 2 minutes of warmup
-uv run ./polarwarp.py --skip=2m oplog.csv.zst
+uv run ./polarwarp.py --skip=2m oplog.trace.tsv.zst
 
 # Compare performance across multiple clients
-uv run ./polarwarp.py --per-client multi_client_oplog.csv.zst
+uv run ./polarwarp.py --per-client multi_client_oplog.trace.tsv.zst
 
-# Export results to Excel
-uv run ./polarwarp.py --excel report.xlsx oplog.csv.zst
+# Export results to Excel (summary files get their own tab)
+uv run ./polarwarp.py --excel report.xlsx oplog.trace.tsv.zst
 
 # Per-endpoint breakdown
-uv run ./polarwarp.py --per-endpoint oplog.csv.zst
+uv run ./polarwarp.py --per-endpoint oplog.trace.tsv.zst
 ```
 
 ## Command Line Options

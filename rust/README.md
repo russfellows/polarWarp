@@ -1,6 +1,6 @@
 # PolarWarp - Rust Implementation
 
-[![Version](https://img.shields.io/badge/version-0.1.6-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](../LICENSE)
 
@@ -15,6 +15,7 @@ Built with [Polars](https://pola.rs/) for blazing-fast DataFrame operations, pol
 ## Features
 
 - **Multi-format support**: TSV and CSV files, with automatic zstd decompression and separator detection
+- **Dual file type support**: Per-operation trace files (`.trace.tsv.zst`) *and* aggregated summary files (`.summary.tsv.zst`) — type auto-detected from header columns
 - **Size-bucketed analysis**: 9 size buckets matching sai3-bench (zero, 1B-8KiB, 8KiB-64KiB, ... >2GiB)
 - **Summary rows**: Aggregate statistics for META (LIST/HEAD/DELETE/STAT), GET, and PUT operations
 - **Per-client statistics**: Compare performance across multiple clients with `--per-client` option
@@ -43,26 +44,29 @@ cargo build --release
 # Display help
 polarwarp-rs --help
 
-# Process a single file
-polarwarp-rs oplog.tsv.zst
+# Process a single trace file
+polarwarp-rs oplog.trace.tsv.zst
 
 # Process multiple files (results are consolidated)
-polarwarp-rs agent-1-oplog.tsv.zst agent-2-oplog.tsv.zst
+polarwarp-rs agent-1.trace.tsv.zst agent-2.trace.tsv.zst
+
+# Process a summary file (type is auto-detected)
+polarwarp-rs run.summary.tsv.zst
 
 # Skip first 2 minutes of warmup
-polarwarp-rs --skip 2m oplog.tsv.zst
+polarwarp-rs --skip 2m oplog.trace.tsv.zst
 
 # Compare performance across multiple clients
-polarwarp-rs --per-client multi_client_oplog.csv.zst
+polarwarp-rs --per-client multi_client_oplog.trace.tsv.zst
 
-# Export results to Excel
-polarwarp-rs --excel report.xlsx oplog.tsv.zst
+# Export results to Excel (summary files get their own tab)
+polarwarp-rs --excel report.xlsx oplog.trace.tsv.zst
 
 # Per-endpoint breakdown
-polarwarp-rs --per-endpoint oplog.tsv.zst
+polarwarp-rs --per-endpoint oplog.trace.tsv.zst
 
 # Show basic file info only
-polarwarp-rs --basic-stats oplog.tsv.zst
+polarwarp-rs --basic-stats oplog.trace.tsv.zst
 ```
 
 ### Command Line Options

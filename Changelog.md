@@ -6,6 +6,32 @@ Both implementations (Rust `polarwarp-rs` and Python `polars-warp`) track the sa
 
 ---
 
+## [0.1.7] - 2026-05-15
+
+### New Features
+
+- **Summary file parsing** (Rust and Python) — PolarWarp now accepts aggregated summary files (e.g. `.summary.tsv.zst`) in addition to per-operation trace files. The file type is auto-detected from the header: if `bps` and `ops_per_sec` columns are present it is treated as a summary; if `duration_ns` is present it is treated as a trace.
+
+  Summary files contain one row per ~1-second time window per operation type (format: `op, start, end, bps, ops_per_sec, errors`), as produced by warp-replay and similar tools. An optional `# cmdline …` comment line before the header is silently skipped.
+
+  For summary files, PolarWarp reports throughput variability across segments, grouped by `op`:
+
+  | Column | Description |
+  |--------|-------------|
+  | `segments` | Number of 1-second windows observed |
+  | `mean/p50/p90/p99/min/max MBps` | Throughput distribution across segments |
+  | `stdev_MBps` | Sample standard deviation of throughput |
+  | `mean/p50/p99 ops/s` | Operation-rate distribution across segments |
+  | `total_errors` | Cumulative error count |
+
+  The `TOTAL` row is always printed last. When only one segment is present, `stdev_MBps` is shown as `N/A`.
+
+  With `--excel`, each summary file produces a dedicated `{name}-Summary` tab in the workbook.
+
+  Mixing trace and summary files in a single invocation is allowed (each is processed independently); a warning is emitted and consolidation is skipped for the summary files.
+
+---
+
 ## [0.1.6] - 2026-02-24
 
 ### Bug Fixes

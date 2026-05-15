@@ -210,16 +210,17 @@ def compute_per_endpoint_stats(df, run_time_secs):
 # ─────────────────────────── Excel export ────────────────────────────────────
 
 def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
-                          cons_df=None, cons_secs=None):
+                          cons_df=None, cons_secs=None, summary_file_data=None):
     """Write all per-file and consolidated results to a multi-tab Excel workbook.
 
     Args:
-        excel_path:    Output .xlsx path.
-        saved_files:   List of dicts: {path, df (polars w/ buckets), run_secs}.
-        per_client:    Whether to write per-client detail tab.
-        per_endpoint:  Whether to write per-endpoint detail tab.
-        cons_df:       Consolidated polars DataFrame (multi-file only).
-        cons_secs:     Consolidated run time in seconds (multi-file only).
+        excel_path:        Output .xlsx path.
+        saved_files:       List of dicts: {path, df (polars w/ buckets), run_secs}.
+        per_client:        Whether to write per-client detail tab.
+        per_endpoint:      Whether to write per-endpoint detail tab.
+        cons_df:           Consolidated polars DataFrame (multi-file only).
+        cons_secs:         Consolidated run time in seconds (multi-file only).
+        summary_file_data: List of dicts: {path, df} for .summary.tsv.zst files.
     """
     try:
         import xlsxwriter
@@ -472,6 +473,27 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
             if per_client or per_endpoint:
                 _write_detail_tab(wb.add_worksheet('Consol-Detail'), cons_df, cons_secs)
 
+        # Write one tab per summary file
+        if summary_file_data:
+            import pandas as pd  # already imported above but guard just in case
+            summary_cols = [
+                "op", "segments",
+                "mean_MBps", "p50_MBps", "p90_MBps", "p99_MBps",
+                "min_MBps", "max_MBps", "stdev_MBps",
+                "mean_ops/s", "p50_ops/s", "p99_ops/s",
+                "total_errors",
+            ]
+            for entry in summary_file_data:
+                sfp, sdf = entry['path'], entry['df']
+                short = _short(sfp)
+                tab_name = _tab(short, 'Summary')
+                ws = wb.add_worksheet(tab_name)
+                stats_pl = _compute_summary_stats_df(sdf)
+                stats_pd = stats_pl.to_pandas()
+                # Keep only columns that exist (guard against schema changes)
+                ordered = [c for c in summary_cols if c in stats_pd.columns]
+                _write_df(ws, stats_pd[ordered], startrow=0)
+
         wb.close()
         print(f"\nExcel file written: {excel_path}")
 
@@ -589,6 +611,101 @@ def print_error(message):
     print(f"Run '{script_name} --help' for usage information.", file=sys.stderr)
     sys.exit(1)
 
+
+def detect_file_type(file_path):
+    """Detect whether a file is a per-op trace or an aggregated summary.
+
+    Reads the first non-comment row via Polars (handles .zst transparently).
+    Returns 'trace' or 'summary'.
+    """
+    try:
+        probe = pl.read_csv(
+            file_path,
+            n_rows=1,
+            separator='\t',
+            comment_prefix='#',
+            ignore_errors=True,
+            glob=False,
+        )
+    except Exception as e:
+        print_error(f"Cannot read file '{file_path}' to detect type: {e}")
+    cols = probe.columns
+    if 'bps' in cols and 'ops_per_sec' in cols:
+        return 'summary'
+    elif 'duration_ns' in cols:
+        return 'trace'
+    else:
+        print_error(
+            f"File '{file_path}' has unrecognized header columns: {cols}\n"
+            f"Expected either trace columns (duration_ns, …) or "
+            f"summary columns (bps, ops_per_sec, …)"
+        )
+
+
+def _compute_summary_stats_df(df):
+    """Compute per-op throughput variability stats from a summary DataFrame.
+
+    Returns a Polars DataFrame with one row per op, sorted (TOTAL last).
+    """
+    stats = (
+        df.group_by("op")
+        .agg([
+            pl.col("bps").count().alias("segments"),
+            (pl.col("bps").mean()          / 1_048_576).alias("mean_MBps"),
+            (pl.col("bps").median()         / 1_048_576).alias("p50_MBps"),
+            (pl.col("bps").quantile(0.90)   / 1_048_576).alias("p90_MBps"),
+            (pl.col("bps").quantile(0.99)   / 1_048_576).alias("p99_MBps"),
+            (pl.col("bps").min()            / 1_048_576).alias("min_MBps"),
+            (pl.col("bps").max()            / 1_048_576).alias("max_MBps"),
+            (pl.col("bps").std(ddof=1)      / 1_048_576).alias("stdev_MBps"),
+            pl.col("ops_per_sec").mean().alias("mean_ops/s"),
+            pl.col("ops_per_sec").median().alias("p50_ops/s"),
+            pl.col("ops_per_sec").quantile(0.99).alias("p99_ops/s"),
+            pl.col("errors").cast(pl.Int64).sum().alias("total_errors"),
+        ])
+        .sort("op")
+    )
+    # Re-sort: non-TOTAL rows first, TOTAL row last
+    non_total = stats.filter(pl.col("op") != "TOTAL")
+    total_row = stats.filter(pl.col("op") == "TOTAL")
+    return pl.concat([non_total, total_row])
+
+
+def compute_and_display_summary_stats(df):
+    """Display per-op throughput variability stats from a summary DataFrame."""
+    stats = _compute_summary_stats_df(df)
+    if stats.is_empty():
+        print("  (no data)")
+        return
+
+    def _fv(v):
+        """Format a numeric value; return 'N/A' for None."""
+        return format_with_commas(v) if v is not None else "N/A"
+
+    print(
+        f"{'op':>8} {'segs':>6} "
+        f"{'mean_MBps':>10} {'p50_MBps':>10} {'p90_MBps':>10} {'p99_MBps':>10} "
+        f"{'min_MBps':>10} {'max_MBps':>10} {'stdev_MBps':>10} "
+        f"{'mean_ops/s':>10} {'p50_ops/s':>10} {'p99_ops/s':>10} "
+        f"{'total_errors':>13}"
+    )
+    for row in stats.iter_rows(named=True):
+        print(
+            f"{row['op']:>8} {row['segments']:>6} "
+            f"{_fv(row['mean_MBps']):>10} "
+            f"{_fv(row['p50_MBps']):>10} "
+            f"{_fv(row['p90_MBps']):>10} "
+            f"{_fv(row['p99_MBps']):>10} "
+            f"{_fv(row['min_MBps']):>10} "
+            f"{_fv(row['max_MBps']):>10} "
+            f"{_fv(row['stdev_MBps']):>10} "
+            f"{_fv(row['mean_ops/s']):>10} "
+            f"{_fv(row['p50_ops/s']):>10} "
+            f"{_fv(row['p99_ops/s']):>10} "
+            f"{format_with_commas(row['total_errors']):>13}"
+        )
+
+
 # Check command line args, give basic usage
 if len(sys.argv) < 2:
     print_usage()
@@ -672,6 +789,11 @@ if excel_path == "":
 # Per-file data saved for Excel export
 saved_file_dfs = []  # list of dict: {path, df, run_secs}
 
+# Summary-file data collected separately for Excel export
+summary_file_data = []   # list of dict: {path, df}
+any_summary_file = False
+any_trace_file = False
+
 # Multi-file consolidation overlap thresholds (Jaccard = overlap / union).
 # Below MIN  -> files are sequential runs, consolidation is skipped.
 # Above MAX  -> files are treated as fully concurrent, no warning emitted.
@@ -694,7 +816,40 @@ for file_path in file_paths:
     try:
         print(f"\nProcessing file: {file_path}")
         process_start = time.time()
-        
+
+        # Detect file type and route summary files to their own handler
+        file_type = detect_file_type(file_path)
+        if file_type == 'summary':
+            any_summary_file = True
+            print(f"Summary Statistics for: {file_path}")
+            summary_df = pl.read_csv(
+                file_path,
+                separator='\t',
+                comment_prefix='#',
+                ignore_errors=True,
+                glob=False,
+            )
+            required_summary = ["op", "start", "end", "bps", "ops_per_sec", "errors"]
+            missing_s = [c for c in required_summary if c not in summary_df.columns]
+            if missing_s:
+                print_error(f"Summary file '{file_path}' is missing required columns: {', '.join(missing_s)}")
+            summary_df = summary_df.with_columns([
+                pl.col("bps").cast(pl.Float64),
+                pl.col("ops_per_sec").cast(pl.Float64),
+            ])
+            seg_count = summary_df.height
+            start_val = summary_df.select(pl.col("start").first()).item()
+            end_val   = summary_df.select(pl.col("end").last()).item()
+            print(f"Time range: {start_val} → {end_val}  ({seg_count} segments)")
+            compute_and_display_summary_stats(summary_df)
+            if excel_path is not None:
+                summary_file_data.append({'path': file_path, 'df': summary_df})
+            process_elapsed = time.time() - process_start
+            print(f"\nProcessed in {process_elapsed:.2f} seconds")
+            continue
+
+        any_trace_file = True
+
         # Try to read the file with error handling
         # glob=False prevents polars from treating brackets in filenames as glob patterns
         try:
@@ -914,10 +1069,30 @@ for file_path in file_paths:
 
 # Done processing each file
 
+# Warn if user mixed trace and summary files
+if any_trace_file and any_summary_file:
+    print(
+        "WARNING: Mixed trace and summary files provided.  "
+        "Consolidation is skipped for summary files; each is reported independently.",
+        file=sys.stderr,
+    )
+
+# If only summary files were provided, write Excel if needed and exit now
+if not any_trace_file:
+    if excel_path is not None:
+        write_polarwarp_excel(
+            excel_path, saved_file_dfs, per_client_stats, per_endpoint_stats,
+            summary_file_data=summary_file_data,
+        )
+    sys.exit(0)
+
 # If there was only one file to parse, write Excel if requested, then exit
 if len(file_paths) == 1:
     if excel_path is not None:
-        write_polarwarp_excel(excel_path, saved_file_dfs, per_client_stats, per_endpoint_stats)
+        write_polarwarp_excel(
+            excel_path, saved_file_dfs, per_client_stats, per_endpoint_stats,
+            summary_file_data=summary_file_data,
+        )
     sys.exit(0)
 
 print(f"\nDone Processing Files... Consolidating Results")
@@ -944,7 +1119,10 @@ if jaccard_pct < OVERLAP_MIN_PCT:
           f"({jaccard_pct:.1f}% Jaccard overlap < {OVERLAP_MIN_PCT:.0f}% threshold).")
     print("  Skipping consolidation \u2013 per-file results above are still valid.")
     if excel_path is not None:
-        write_polarwarp_excel(excel_path, saved_file_dfs, per_client_stats, per_endpoint_stats)
+        write_polarwarp_excel(
+            excel_path, saved_file_dfs, per_client_stats, per_endpoint_stats,
+            summary_file_data=summary_file_data,
+        )
     sys.exit(0)
 
 if jaccard_pct < OVERLAP_MAX_PCT:
@@ -1045,4 +1223,5 @@ if excel_path is not None:
     write_polarwarp_excel(
         excel_path, saved_file_dfs, per_client_stats, per_endpoint_stats,
         consolidated_df, consolidated_run_secs,
+        summary_file_data=summary_file_data,
     )

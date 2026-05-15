@@ -10,3 +10,9 @@ dependencies = [
     "pyarrow>=23.0.1",
     "xlsxwriter>=3.2.9",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "zstandard>=0.23",
+]

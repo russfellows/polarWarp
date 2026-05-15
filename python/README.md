@@ -3,6 +3,7 @@
 [![Version](https://img.shields.io/badge/version-0.1.7-brightgreen.svg)](../Changelog.md)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](../LICENSE)
+[![Tests](https://img.shields.io/badge/tests-44%20passing-brightgreen.svg)](tests/test_polarwarp.py)
 
 Python implementation of PolarWarp using [Polars](https://pola.rs/) for fast DataFrame operations.
 
@@ -90,3 +91,27 @@ Matching sai3-bench bucket definitions:
 | 6 | 32MiB-256MiB | 32 MiB to 256 MiB |
 | 7 | 256MiB-2GiB | 256 MiB to 2 GiB |
 | 8 | >2GiB | Greater than 2 GiB |
+
+## Testing
+
+The Python implementation has 44 unit tests covering `format_with_commas`, `_excel_derive_path`,
+short-name and tab-name helpers, skip-time pattern parsing, `timedelta` formatting,
+`detect_file_type`, `_compute_summary_stats_df`, and the size-bucket Polars expressions.
+
+Tests are located in `tests/test_polarwarp.py` and require [uv](https://github.com/astral-sh/uv).
+
+```bash
+cd python
+
+# Run all tests
+uv run --group dev pytest tests/test_polarwarp.py -v
+
+# Run a specific test class
+uv run --group dev pytest tests/test_polarwarp.py::TestSizeBuckets -v
+
+# Run quietly (summary only)
+uv run --group dev pytest tests/test_polarwarp.py -q
+```
+
+The `pytest` and `zstandard` packages are declared as dev-only dependencies in `pyproject.toml`
+under `[dependency-groups] dev` — they are not installed when users install polarwarp normally.

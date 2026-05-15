@@ -3,6 +3,7 @@
 [![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](../LICENSE)
+[![Tests](https://img.shields.io/badge/tests-28%20passing-brightgreen.svg)](src/main.rs)
 
 A high-performance Rust implementation of PolarWarp for analyzing storage I/O operation logs.
 
@@ -147,6 +148,25 @@ idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  firs
 - [Clap](https://clap.rs/) - Command-line argument parsing
 - [Chrono](https://docs.rs/chrono/) - Date/time handling
 - [zstd](https://docs.rs/zstd/) - Zstandard compression
+
+## Testing
+
+The Rust implementation has 28 unit tests embedded in `src/main.rs` (in the `#[cfg(test)] mod tests` block).
+
+```bash
+# Run all tests
+cargo test
+
+# Run tests with output visible
+cargo test -- --nocapture
+
+# Run a specific test by name
+cargo test test_size_bucket
+```
+
+Tests cover: `parse_skip_time`, `format_with_commas`, `format_int_with_commas`,
+`format_duration_ns`, `derive_short_name`, `derive_excel_path`, `make_tab_name`,
+`FileType` equality, and `add_size_buckets`.
 
 ## Related Projects
 

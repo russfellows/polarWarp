@@ -4,6 +4,8 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](python/)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](rust/)
+[![Rust Tests](https://img.shields.io/badge/rust%20tests-28%20passing-brightgreen.svg)](rust/src/main.rs)
+[![Python Tests](https://img.shields.io/badge/python%20tests-44%20passing-brightgreen.svg)](python/tests/test_polarwarp.py)
 
 High-performance tool for analyzing storage I/O operation logs (oplog files from sai3-bench, MinIO Warp, etc.).
 

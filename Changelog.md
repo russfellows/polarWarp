@@ -6,9 +6,38 @@ Both implementations (Rust `polarwarp-rs` and Python `polars-warp`) track the sa
 
 ---
 
+## [0.2.0] - 2026-05-15
+
+### New Features
+
+- **Time-series performance charts** (Rust and Python) — When processing summary files
+  (`.summary.tsv.zst`) with `--excel`, PolarWarp now generates a `{name}-Charts` Excel tab
+  alongside the existing `{name}-Summary` tab. The Charts tab contains two embedded line charts:
+
+  | Chart | X-axis | Y-axis | Series |
+  |-------|--------|--------|--------|
+  | Operations/sec over Time | Seconds from start | ops/sec | GET, PUT, META |
+  | Throughput (MiB/s) over Time | Seconds from start | MiB/s | GET, PUT |
+
+  The underlying time-series data (wide-format pivot table with one row per second) is written
+  above the charts for further analysis in Excel. META is excluded from the throughput chart
+  because metadata operations carry no meaningful byte payload.
+
+---
+
 ## [0.1.7] - 2026-05-15
 
 ### New Features
+
+- **Unit tests** — Both implementations now include comprehensive unit test suites:
+  - **Rust** (`rust/src/main.rs`): 28 tests covering `parse_skip_time`,
+    `format_with_commas`, `format_int_with_commas`, `format_duration_ns`,
+    `derive_short_name`, `derive_excel_path`, `make_tab_name`, `FileType` equality,
+    and `add_size_buckets`. Run with `cargo test`.
+  - **Python** (`python/tests/test_polarwarp.py`): 44 tests covering `format_with_commas`,
+    `_excel_derive_path`, short-name derivation, tab-name truncation, skip-pattern parsing,
+    timedelta formatting, file-type detection, summary stats aggregation, and size bucket logic.
+    Run with `uv run --group dev pytest tests/`.
 
 - **Summary file parsing** (Rust and Python) — PolarWarp now accepts aggregated summary files (e.g. `.summary.tsv.zst`) in addition to per-operation trace files. The file type is auto-detected from the header: if `bps` and `ops_per_sec` columns are present it is treated as a summary; if `duration_ns` is present it is treated as a trace.
 

@@ -2112,3 +2112,242 @@ fn collect_per_endpoint_rows(df: &DataFrame, run_time_secs: f64) -> Result<Vec<V
 
     Ok(rows)
 }
+
+// ─────────────────────────────── Unit tests ──────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_skip_time ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_skip_time_seconds() {
+        let nanos = parse_skip_time("90s").unwrap();
+        assert_eq!(nanos, 90 * 1_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_skip_time_minutes() {
+        let nanos = parse_skip_time("5m").unwrap();
+        assert_eq!(nanos, 5 * 60 * 1_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_skip_time_zero() {
+        let nanos = parse_skip_time("0s").unwrap();
+        assert_eq!(nanos, 0);
+    }
+
+    #[test]
+    fn test_parse_skip_time_invalid_unit() {
+        // "h" (hours) is not a recognised unit
+        assert!(parse_skip_time("2h").is_err());
+    }
+
+    #[test]
+    fn test_parse_skip_time_invalid_format() {
+        assert!(parse_skip_time("abc").is_err());
+        assert!(parse_skip_time("").is_err());
+    }
+
+    // ── format_with_commas ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_format_with_commas_zero() {
+        assert_eq!(format_with_commas(0.0), "0.00");
+    }
+
+    #[test]
+    fn test_format_with_commas_thousands() {
+        assert_eq!(format_with_commas(1_000.0), "1,000.00");
+    }
+
+    #[test]
+    fn test_format_with_commas_large() {
+        assert_eq!(format_with_commas(1_234_567.0), "1,234,567.00");
+    }
+
+    #[test]
+    fn test_format_with_commas_fractional() {
+        // 1024.75: integer part 1024 gets commas, fractional part is .75
+        assert_eq!(format_with_commas(1_024.75), "1,024.75");
+    }
+
+    // ── format_int_with_commas ──────────────────────────────────────────────
+
+    #[test]
+    fn test_format_int_with_commas_small() {
+        assert_eq!(format_int_with_commas(42), "42");
+    }
+
+    #[test]
+    fn test_format_int_with_commas_million() {
+        assert_eq!(format_int_with_commas(1_000_000), "1,000,000");
+    }
+
+    // ── format_duration_ns ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_format_duration_ns_zero() {
+        // 0 ns → 0 h, 0 m, 0.0 s  — seconds field uses {:09.6} = "00.000000"
+        assert_eq!(format_duration_ns(0), "0:00:00.000000");
+    }
+
+    #[test]
+    fn test_format_duration_ns_one_second() {
+        assert_eq!(format_duration_ns(1_000_000_000), "0:00:01.000000");
+    }
+
+    #[test]
+    fn test_format_duration_ns_one_minute() {
+        assert_eq!(format_duration_ns(60_000_000_000), "0:01:00.000000");
+    }
+
+    #[test]
+    fn test_format_duration_ns_one_hour() {
+        assert_eq!(format_duration_ns(3_600_000_000_000), "1:00:00.000000");
+    }
+
+    #[test]
+    fn test_format_duration_ns_90_seconds() {
+        // 90 s = 1 min 30 s
+        assert_eq!(format_duration_ns(90_000_000_000), "0:01:30.000000");
+    }
+
+    // ── derive_short_name ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_derive_short_name_tsv_zst() {
+        assert_eq!(derive_short_name("agent-1.tsv.zst"), "agent-1");
+    }
+
+    #[test]
+    fn test_derive_short_name_csv_no_zst() {
+        assert_eq!(derive_short_name("/tmp/results.csv"), "results");
+    }
+
+    #[test]
+    fn test_derive_short_name_warp_bracket() {
+        // Warp-style filename: everything from '[' onwards is stripped
+        assert_eq!(derive_short_name("warp-run[20260101]-abc.tsv.zst"), "warp-run");
+    }
+
+    #[test]
+    fn test_derive_short_name_truncates_to_20() {
+        // A base name longer than 20 chars must be truncated to at most 20
+        let name = derive_short_name("this-is-a-very-long-filename-indeed.tsv.zst");
+        assert!(name.len() <= 20, "expected ≤20 chars, got {}: {:?}", name.len(), name);
+    }
+
+    // ── derive_excel_path ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_derive_excel_path_single_file() {
+        // Single file with no directory component → same stem with .xlsx extension
+        let path = derive_excel_path(&["run.tsv.zst".to_string()]);
+        assert_eq!(path, "run.xlsx");
+    }
+
+    #[test]
+    fn test_derive_excel_path_multiple_files() {
+        let path = derive_excel_path(&[
+            "agent-1.tsv.zst".to_string(),
+            "agent-2.tsv.zst".to_string(),
+        ]);
+        assert_eq!(path, "polarwarp-results.xlsx");
+    }
+
+    // ── make_tab_name ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_make_tab_name_short() {
+        assert_eq!(make_tab_name("run", "Results"), "run-Results");
+    }
+
+    #[test]
+    fn test_make_tab_name_enforces_31_char_limit() {
+        // Excel worksheet names must be ≤ 31 characters
+        let name = make_tab_name("this-is-a-very-long-base-name-here", "Results");
+        assert!(
+            name.len() <= 31,
+            "expected ≤31 chars, got {}: {:?}",
+            name.len(),
+            name
+        );
+        assert!(name.ends_with("-Results"), "expected '-Results' suffix, got {:?}", name);
+    }
+
+    // ── FileType enum ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_file_type_equality() {
+        assert_eq!(FileType::Trace, FileType::Trace);
+        assert_eq!(FileType::Summary, FileType::Summary);
+        assert_ne!(FileType::Trace, FileType::Summary);
+    }
+
+    // ── add_size_buckets (core bucketing logic) ─────────────────────────────
+
+    #[test]
+    fn test_size_bucket_zero_bytes() {
+        let df = df!["bytes" => [0i64]].unwrap();
+        let result = add_size_buckets(df).unwrap();
+        let bucket = result.column("bytes_bucket").unwrap().str().unwrap().get(0).unwrap();
+        assert_eq!(bucket, "zero");
+    }
+
+    #[test]
+    fn test_size_bucket_boundaries() {
+        // One value per bucket, including each exact lower boundary
+        let df = df![
+            "bytes" => [
+                1i64,               // 1B-8KiB  (1 byte)
+                8 * 1024 - 1,       // 1B-8KiB  (8191 bytes, just below 8 KiB)
+                8 * 1024,           // 8KiB-64KiB  (8192 = BUCKET_8K)
+                64 * 1024,          // 64KiB-512KiB
+                512 * 1024,         // 512KiB-4MiB
+                4 * 1024 * 1024,    // 4MiB-32MiB
+                32 * 1024 * 1024,   // 32MiB-256MiB
+                256 * 1024 * 1024,  // 256MiB-2GiB
+                2i64 * 1024 * 1024 * 1024  // >2GiB
+            ]
+        ]
+        .unwrap();
+
+        let result = add_size_buckets(df).unwrap();
+        let bc = result.column("bytes_bucket").unwrap().str().unwrap();
+
+        assert_eq!(bc.get(0).unwrap(), "1B-8KiB",       "1 byte");
+        assert_eq!(bc.get(1).unwrap(), "1B-8KiB",       "8191 bytes");
+        assert_eq!(bc.get(2).unwrap(), "8KiB-64KiB",    "8192 bytes");
+        assert_eq!(bc.get(3).unwrap(), "64KiB-512KiB",  "64 KiB");
+        assert_eq!(bc.get(4).unwrap(), "512KiB-4MiB",   "512 KiB");
+        assert_eq!(bc.get(5).unwrap(), "4MiB-32MiB",    "4 MiB");
+        assert_eq!(bc.get(6).unwrap(), "32MiB-256MiB",  "32 MiB");
+        assert_eq!(bc.get(7).unwrap(), "256MiB-2GiB",   "256 MiB");
+        assert_eq!(bc.get(8).unwrap(), ">2GiB",         "2 GiB");
+    }
+
+    #[test]
+    fn test_size_bucket_num_matches_label() {
+        // bucket_num and bytes_bucket must be consistent for every row
+        let df = df![
+            "bytes" => [0i64, 1i64, 8192i64, 65536i64, 524288i64,
+                        4194304i64, 33554432i64, 268435456i64, 2147483648i64]
+        ]
+        .unwrap();
+        let result = add_size_buckets(df).unwrap();
+        let labels = result.column("bytes_bucket").unwrap().str().unwrap();
+        let nums   = result.column("bucket_num").unwrap().i32().unwrap();
+
+        for i in 0..result.height() {
+            let label = labels.get(i).unwrap();
+            let num   = nums.get(i).unwrap();
+            assert_eq!(
+                label, BUCKET_LABELS[num as usize],
+                "row {}: bucket_num {} → label mismatch", i, num
+            );
+        }
+    }
+}

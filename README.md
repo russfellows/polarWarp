@@ -17,7 +17,7 @@ High-performance tool for analyzing storage I/O operation logs (oplog files from
 - **Summary rows**: Aggregate statistics for META (LIST/HEAD/DELETE/STAT), GET, and PUT operations
 - **Per-client statistics**: Compare performance across multiple clients with `--per-client` option
 - **Per-endpoint statistics**: Compare performance across storage endpoints with `--per-endpoint` option
-- **Excel export**: Export results to a formatted `.xlsx` workbook with `--excel` option
+- **Excel export**: Export results to a formatted `.xlsx` workbook with `--excel` option; summary files additionally produce time-series line charts
 - **Latency percentiles**: mean, median, p90, p95, p99, max (statistically valid)
 - **Throughput metrics**: ops/sec and MiB/sec per bucket
 - **Multi-file consolidation**: Combine results from multiple agents, with automatic overlap detection — sequential runs are flagged and skipped, partial overlaps are warned and trimmed to the intersection window
@@ -228,7 +228,9 @@ For summary files, PolarWarp reports throughput variability statistics across se
    TOTAL    120   2,048.00   2,032.15   2,350.40   2,478.20   1,800.00   2,520.00        N/A     512.00     508.04     619.55             0
 ```
 
-With `--excel`, summary files produce a dedicated `{name}-Summary` tab in the workbook.
+With `--excel`, summary files produce two dedicated tabs in the workbook:
+- **`{name}-Summary`** — aggregate throughput statistics (mean, p50, p90, p99, min, max, stdev) per op type
+- **`{name}-Charts`** — per-second time-series data with two embedded line charts: ops/sec over time (all op types) and throughput MiB/s over time (GET + PUT)
 
 ## Related Projects
 

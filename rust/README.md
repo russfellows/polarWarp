@@ -1,6 +1,6 @@
 # PolarWarp - Rust Implementation
 
-[![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](../LICENSE)
 [![Tests](https://img.shields.io/badge/tests-28%20passing-brightgreen.svg)](src/main.rs)
@@ -60,8 +60,11 @@ polarwarp-rs --skip 2m oplog.trace.tsv.zst
 # Compare performance across multiple clients
 polarwarp-rs --per-client multi_client_oplog.trace.tsv.zst
 
-# Export results to Excel (summary files get their own tab)
+# Export results to Excel
 polarwarp-rs --excel report.xlsx oplog.trace.tsv.zst
+
+# Summary files produce a Stats tab + a Charts tab (ops/sec and MiB/s over time)
+polarwarp-rs --excel run.summary.tsv.zst
 
 # Per-endpoint breakdown
 polarwarp-rs --per-endpoint oplog.trace.tsv.zst
@@ -176,7 +179,6 @@ Tests cover: `parse_skip_time`, `format_with_commas`, `format_int_with_commas`,
 ## Future Enhancements
 
 - Parallel file processing with Rayon
-- Time-window analysis for detecting performance changes
 - Comparative analysis between test runs
 
 ## License

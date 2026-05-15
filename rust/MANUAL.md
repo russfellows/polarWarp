@@ -138,10 +138,12 @@ Each workbook contains the following sheets:
 
 | Sheet | Contents |
 |-------|----------|
-| `<filename>-Results` | Full size-bucketed statistics table for one input file |
-| `<filename>-Detail` | Per-endpoint (or per-client) breakdown for one input file |
-| `Consolidated-Results` | Merged results across all files (only present when `>1` file is given) |
-| `Consolidated-Detail` | Merged per-endpoint breakdown (only when `>1` file is given) |
+| `<filename>-Results` | Full size-bucketed statistics table for one trace file |
+| `<filename>-Detail` | Per-endpoint (or per-client) breakdown for one trace file |
+| `Consolidated-Results` | Merged results across all trace files (only present when `>1` file is given) |
+| `Consolidated-Detail` | Merged per-endpoint breakdown (only when `>1` trace file is given) |
+| `<filename>-Summary` | Aggregate throughput statistics per op type for one summary file |
+| `<filename>-Charts` | Per-second time-series data with ops/sec and MiB/s line charts for one summary file |
 
 Detail tabs contain three sections:
 - **Overall** — aggregate per-endpoint stats (all op types combined)
@@ -161,14 +163,21 @@ PolarWarp-rs supports the following file formats:
 - `.csv` - Comma-separated values
 - `.csv.zst` - ZSTD compressed CSV files
 
-The tool automatically detects the separator based on file extension.
+The tool automatically detects the separator based on file extension. The **file type** (trace vs. summary) is auto-detected from the header columns.
 
-### Expected Columns
+### Trace file columns (per-operation oplog)
 
-Oplog files should have these columns (matching sai3-bench format):
 ```
 idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  first_byte  end  duration_ns
 ```
+
+### Summary file columns (aggregated time-series)
+
+```
+op  start  end  bps  ops_per_sec  errors
+```
+
+Each row represents one ~1-second time window per operation type (plus a `TOTAL` row). An optional `# cmdline …` comment before the header is ignored.
 
 ## Performance Expectations
 

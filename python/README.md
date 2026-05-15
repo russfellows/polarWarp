@@ -1,6 +1,6 @@
 # PolarWarp - Python Implementation
 
-[![Version](https://img.shields.io/badge/version-0.1.7-brightgreen.svg)](../Changelog.md)
+[![Version](https://img.shields.io/badge/version-0.2.0-brightgreen.svg)](../Changelog.md)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](../LICENSE)
 [![Tests](https://img.shields.io/badge/tests-44%20passing-brightgreen.svg)](tests/test_polarwarp.py)
@@ -48,8 +48,11 @@ uv run ./polarwarp.py --skip=2m oplog.trace.tsv.zst
 # Compare performance across multiple clients
 uv run ./polarwarp.py --per-client multi_client_oplog.trace.tsv.zst
 
-# Export results to Excel (summary files get their own tab)
+# Export results to Excel
 uv run ./polarwarp.py --excel report.xlsx oplog.trace.tsv.zst
+
+# Summary files produce a Stats tab + a Charts tab (ops/sec and MiB/s over time)
+uv run ./polarwarp.py --excel run.summary.tsv.zst
 
 # Per-endpoint breakdown
 uv run ./polarwarp.py --per-endpoint oplog.trace.tsv.zst

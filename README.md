@@ -1,20 +1,23 @@
 # PolarWarp
 
-[![Version](https://img.shields.io/badge/version-0.1.6-brightgreen.svg)](https://github.com/russfellows/polarWarp/releases)
+[![Version](https://img.shields.io/badge/version-0.2.0-brightgreen.svg)](https://github.com/russfellows/polarWarp/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](python/)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](rust/)
+[![Rust Tests](https://img.shields.io/badge/rust%20tests-28%20passing-brightgreen.svg)](rust/src/main.rs)
+[![Python Tests](https://img.shields.io/badge/python%20tests-44%20passing-brightgreen.svg)](python/tests/test_polarwarp.py)
 
 High-performance tool for analyzing storage I/O operation logs (oplog files from sai3-bench, MinIO Warp, etc.).
 
 ## Features
 
 - **Multi-format support**: TSV and CSV files, with automatic zstd decompression and separator detection
+- **Dual file type support**: Per-operation trace files (`.trace.tsv.zst`) *and* aggregated summary files (`.summary.tsv.zst`) — file type is auto-detected from header columns
 - **Size-bucketed analysis**: 9 size buckets (zero, 1B-8KiB, ... >2GiB)
 - **Summary rows**: Aggregate statistics for META (LIST/HEAD/DELETE/STAT), GET, and PUT operations
 - **Per-client statistics**: Compare performance across multiple clients with `--per-client` option
 - **Per-endpoint statistics**: Compare performance across storage endpoints with `--per-endpoint` option
-- **Excel export**: Export results to a formatted `.xlsx` workbook with `--excel` option
+- **Excel export**: Export results to a formatted `.xlsx` workbook with `--excel` option; summary files additionally produce time-series line charts
 - **Latency percentiles**: mean, median, p90, p95, p99, max (statistically valid)
 - **Throughput metrics**: ops/sec and MiB/sec per bucket
 - **Multi-file consolidation**: Combine results from multiple agents, with automatic overlap detection — sequential runs are flagged and skipped, partial overlaps are warned and trimmed to the intersection window
@@ -195,13 +198,39 @@ Both implementations use identical bucket definitions (matching sai3-bench):
 
 ## Input File Format
 
-Expected columns (sai3-bench oplog format):
+PolarWarp auto-detects the file type from its header columns.
+
+### Trace files (per-operation oplog)
+
+Required columns (sai3-bench / warp oplog format):
 
 ```
 idx  thread  op  client_id  n_objects  bytes  endpoint  file  error  start  first_byte  end  duration_ns
 ```
 
 Also supports MinIO Warp CSV output format.
+
+### Summary files (aggregated time-series)
+
+PolarWarp can also parse the aggregated summary output produced by warp-replay and similar tools. These files use the columns:
+
+```
+op  start  end  bps  ops_per_sec  errors
+```
+
+Each row represents one ~1-second time window per operation type (plus a `TOTAL` row). Files may contain an optional `# cmdline …` comment before the header.
+
+For summary files, PolarWarp reports throughput variability statistics across segments:
+
+```
+      op   segs  mean_MBps   p50_MBps   p90_MBps   p99_MBps   min_MBps   max_MBps stdev_MBps mean_ops/s  p50_ops/s  p99_ops/s  total_errors
+     GET    120   2,048.00   2,032.15   2,350.40   2,478.20   1,800.00   2,520.00     142.33     512.00     508.04     619.55             0
+   TOTAL    120   2,048.00   2,032.15   2,350.40   2,478.20   1,800.00   2,520.00        N/A     512.00     508.04     619.55             0
+```
+
+With `--excel`, summary files produce two dedicated tabs in the workbook:
+- **`{name}-Summary`** — aggregate throughput statistics (mean, p50, p90, p99, min, max, stdev) per op type
+- **`{name}-Charts`** — per-second time-series data with two embedded line charts: ops/sec over time (all op types) and throughput MiB/s over time (GET + PUT)
 
 ## Related Projects
 

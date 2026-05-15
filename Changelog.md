@@ -6,6 +6,61 @@ Both implementations (Rust `polarwarp-rs` and Python `polars-warp`) track the sa
 
 ---
 
+## [0.2.0] - 2026-05-15
+
+### New Features
+
+- **Time-series performance charts** (Rust and Python) — When processing summary files
+  (`.summary.tsv.zst`) with `--excel`, PolarWarp now generates a `{name}-Charts` Excel tab
+  alongside the existing `{name}-Summary` tab. The Charts tab contains two embedded line charts:
+
+  | Chart | X-axis | Y-axis | Series |
+  |-------|--------|--------|--------|
+  | Operations/sec over Time | Seconds from start | ops/sec | GET, PUT, META |
+  | Throughput (MiB/s) over Time | Seconds from start | MiB/s | GET, PUT |
+
+  The underlying time-series data (wide-format pivot table with one row per second) is written
+  above the charts for further analysis in Excel. META is excluded from the throughput chart
+  because metadata operations carry no meaningful byte payload.
+
+---
+
+## [0.1.7] - 2026-05-15
+
+### New Features
+
+- **Unit tests** — Both implementations now include comprehensive unit test suites:
+  - **Rust** (`rust/src/main.rs`): 28 tests covering `parse_skip_time`,
+    `format_with_commas`, `format_int_with_commas`, `format_duration_ns`,
+    `derive_short_name`, `derive_excel_path`, `make_tab_name`, `FileType` equality,
+    and `add_size_buckets`. Run with `cargo test`.
+  - **Python** (`python/tests/test_polarwarp.py`): 44 tests covering `format_with_commas`,
+    `_excel_derive_path`, short-name derivation, tab-name truncation, skip-pattern parsing,
+    timedelta formatting, file-type detection, summary stats aggregation, and size bucket logic.
+    Run with `uv run --group dev pytest tests/`.
+
+- **Summary file parsing** (Rust and Python) — PolarWarp now accepts aggregated summary files (e.g. `.summary.tsv.zst`) in addition to per-operation trace files. The file type is auto-detected from the header: if `bps` and `ops_per_sec` columns are present it is treated as a summary; if `duration_ns` is present it is treated as a trace.
+
+  Summary files contain one row per ~1-second time window per operation type (format: `op, start, end, bps, ops_per_sec, errors`), as produced by warp-replay and similar tools. An optional `# cmdline …` comment line before the header is silently skipped.
+
+  For summary files, PolarWarp reports throughput variability across segments, grouped by `op`:
+
+  | Column | Description |
+  |--------|-------------|
+  | `segments` | Number of 1-second windows observed |
+  | `mean/p50/p90/p99/min/max MBps` | Throughput distribution across segments |
+  | `stdev_MBps` | Sample standard deviation of throughput |
+  | `mean/p50/p99 ops/s` | Operation-rate distribution across segments |
+  | `total_errors` | Cumulative error count |
+
+  The `TOTAL` row is always printed last. When only one segment is present, `stdev_MBps` is shown as `N/A`.
+
+  With `--excel`, each summary file produces a dedicated `{name}-Summary` tab in the workbook.
+
+  Mixing trace and summary files in a single invocation is allowed (each is processed independently); a warning is emitted and consolidation is skipped for the summary files.
+
+---
+
 ## [0.1.6] - 2026-02-24
 
 ### Bug Fixes

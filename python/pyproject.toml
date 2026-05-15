@@ -13,6 +13,42 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pylint>=4.0.5",
     "pytest>=8.0",
+    "ruff>=0.15.13",
     "zstandard>=0.23",
 ]
+
+[tool.pylint.messages_control]
+# By-design patterns that are not bugs:
+disable = [
+    # Large single-module design: all logic is intentionally in one file / one function
+    "too-many-lines",          # C0302 — single-file tool by design
+    "too-many-statements",     # R0915 — write_polarwarp_excel is intentionally large
+    "too-many-branches",       # R0912
+    "too-many-locals",         # R0914
+    "too-many-arguments",      # R0913
+    "too-many-positional-arguments",  # R0917
+    # UPPER_CASE names are the standard Python convention for module-level constants
+    "invalid-name",            # C0103 — BUCKET_* names are intentional constants
+    # Inner functions intentionally reuse parameter names from outer scope
+    "redefined-outer-name",    # W0621
+    # Lazy imports for optional / heavy dependencies (xlsxwriter, pandas)
+    "import-outside-toplevel", # C0415
+    # val != val is an intentional NaN check (polars/pandas idiom)
+    "comparison-with-itself",  # R0124
+    # Broad exception catching is intentional defensive I/O error handling
+    "broad-exception-caught",  # W0718
+    # Docstrings: not required for this single-file utility
+    "missing-module-docstring",   # C0114
+    "missing-function-docstring", # C0116
+]
+
+[tool.pylint.format]
+max-line-length = 140
+
+[tool.ruff]
+line-length = 140
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]

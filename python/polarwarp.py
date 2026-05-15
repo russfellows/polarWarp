@@ -5,44 +5,45 @@
 #
 # Program Description:  This program is designed to process the Minio Warp tool output files.
 #
-#    Using the Polars package to efficiently process data, this program operates approximately 
-#    20x faster than the default warp processing tool.  Additionally, this version uses about 
-#    10X *less* memory than the warp program, perhaps less.  If memory usage is still an issue, 
-#    this program may be modified, by reducing the "bytes_bucket" dataFrame based on the 
-#    values in the column "bytes".  Each reduction in the decision tree, reduces memory usage 
-#    by about 10 - 15%.  Currently, there are 8 buckets.  Reducing this to 4 buckets, would 
-#    cut memory use about 50%. 
-# 
-#    If multiple files are given on the command line to process, it will provide statistics 
-#    for each file individually, and then attempt to combine the results, if the runtimes 
-#    overlap.  If there is no overlapping time, then no consolidated results can be derived.   
+#    Using the Polars package to efficiently process data, this program operates approximately
+#    20x faster than the default warp processing tool.  Additionally, this version uses about
+#    10X *less* memory than the warp program, perhaps less.  If memory usage is still an issue,
+#    this program may be modified, by reducing the "bytes_bucket" dataFrame based on the
+#    values in the column "bytes".  Each reduction in the decision tree, reduces memory usage
+#    by about 10 - 15%.  Currently, there are 8 buckets.  Reducing this to 4 buckets, would
+#    cut memory use about 50%.
 #
-# Python Environment:  HIGHLY recommend using a modern package manager such as "uv" or "pixi" 
-#    to manage packages.  If you insist, old relics such as conda may work, but I wouldn't 
+#    If multiple files are given on the command line to process, it will provide statistics
+#    for each file individually, and then attempt to combine the results, if the runtimes
+#    overlap.  If there is no overlapping time, then no consolidated results can be derived.
+#
+# Python Environment:  HIGHLY recommend using a modern package manager such as "uv" or "pixi"
+#    to manage packages.  If you insist, old relics such as conda may work, but I wouldn't
 #    count on it, pip is probably fine.
 #
 # Example: if using uv, the following should add the necessary libraries
 #  uv add polars pyarrow zstandard zstd openpyxl
 #
 ################################
-import polars as pl
-from datetime import datetime, timedelta
-import sys
-import re
-import time
 import os
+import re
+import sys
+import time
+from datetime import timedelta
+
+import polars as pl
 
 # Metadata operations that should be grouped together (matching Rust implementation)
 META_OPS = ["LIST", "HEAD", "DELETE", "STAT"]
+
 
 # Function to pretty up the output, by adding commas for readability, and using 4 digits for float
 def format_with_commas(value):
     if isinstance(value, (int, float)):
         if isinstance(value, float):
             return f"{value:,.2f}"
-            #return f"{value:,.4f}"
-        else:
-            return f"{value:,}"
+            # return f"{value:,.4f}"
+        return f"{value:,}"
     return value  # Return the value unchanged if it's not numeric
 
 
@@ -53,75 +54,108 @@ def compute_per_client_stats(df, run_time_secs):
     """
     # Get unique clients
     clients = df.select(pl.col("client_id").unique()).to_series().to_list()
-    
+
     if len(clients) <= 1:
         print("\nOnly one client detected, skipping per-client statistics.")
         return None
-    
-    print(f"\n{'='*80}")
+
+    print(f"\n{'=' * 80}")
     print(f"Per-Client Statistics ({len(clients)} clients detected)")
-    print(f"{'='*80}")
-    
+    print(f"{'=' * 80}")
+
     # Compute stats for each client
-    client_stats = df.group_by(["client_id"]).agg([
-        (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
-        (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
-        (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
-        (pl.col("duration_ns").quantile(0.95) / 1000).alias("95%_lat_us"),
-        (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
-        (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
-        (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
-        (pl.count("op") / run_time_secs).alias("ops_/_sec"),
-        ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias("xput_MBps"),
-        pl.count("op").alias("count"),
-    ]).sort("client_id")
-    
+    client_stats = (
+        df.group_by(["client_id"])
+        .agg(
+            [
+                (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
+                (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
+                (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
+                (pl.col("duration_ns").quantile(0.95) / 1000).alias("95%_lat_us"),
+                (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
+                (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
+                (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
+                (pl.count("op") / run_time_secs).alias("ops_/_sec"),
+                ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias(
+                    "xput_MBps"
+                ),
+                pl.count("op").alias("count"),
+            ]
+        )
+        .sort("client_id")
+    )
+
     # Convert to pandas for pretty printing
     client_stats_pd = client_stats.to_pandas()
-    
+
     columns_to_format = [
-        "mean_lat_us", "med._lat_us", "90%_lat_us", "95%_lat_us", "99%_lat_us", 
-        "max_lat_us", "avg_obj_KB", "ops_/_sec", "xput_MBps", "count"
+        "mean_lat_us",
+        "med._lat_us",
+        "90%_lat_us",
+        "95%_lat_us",
+        "99%_lat_us",
+        "max_lat_us",
+        "avg_obj_KB",
+        "ops_/_sec",
+        "xput_MBps",
+        "count",
     ]
-    
+
     for column in columns_to_format:
         if column in client_stats_pd:
             client_stats_pd[column] = client_stats_pd[column].map(format_with_commas)
-    
+
     print(client_stats_pd.to_string(index=False))
-    
+
     # Also compute per-client stats for each operation type
-    print(f"\nPer-Client Statistics by Operation Type:")
-    print(f"{'-'*80}")
-    
+    print("\nPer-Client Statistics by Operation Type:")
+    print(f"{'-' * 80}")
+
     for op_type in ["META", "GET", "PUT"]:
         if op_type == "META":
             op_df = df.filter(pl.col("op").is_in(META_OPS))
         else:
             op_df = df.filter(pl.col("op") == op_type)
-        
+
         if op_df.height == 0:
             continue
-        
-        op_client_stats = op_df.group_by(["client_id"]).agg([
-            (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
-            (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
-            (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
-            (pl.count("op") / run_time_secs).alias("ops_/_sec"),
-            ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias("xput_MBps"),
-            pl.count("op").alias("count"),
-        ]).sort("client_id")
-        
+
+        op_client_stats = (
+            op_df.group_by(["client_id"])
+            .agg(
+                [
+                    (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
+                    (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
+                    (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
+                    (pl.count("op") / run_time_secs).alias("ops_/_sec"),
+                    ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias(
+                        "xput_MBps"
+                    ),
+                    pl.count("op").alias("count"),
+                ]
+            )
+            .sort("client_id")
+        )
+
         op_client_stats_pd = op_client_stats.to_pandas()
-        
-        for column in ["mean_lat_us", "med._lat_us", "99%_lat_us", "ops_/_sec", "xput_MBps", "count"]:
+
+        for column in [
+            "mean_lat_us",
+            "med._lat_us",
+            "99%_lat_us",
+            "ops_/_sec",
+            "xput_MBps",
+            "count",
+        ]:
             if column in op_client_stats_pd:
-                op_client_stats_pd[column] = op_client_stats_pd[column].map(format_with_commas)
-        
+                op_client_stats_pd[column] = op_client_stats_pd[column].map(
+                    format_with_commas
+                )
+
         print(f"\n{op_type} Operations:")
         print(op_client_stats_pd.to_string(index=False))
-    
-    print(f"\n{'='*80}\n")
+
+    print(f"\n{'=' * 80}\n")
     return client_stats
 
 
@@ -134,47 +168,64 @@ def compute_per_endpoint_stats(df, run_time_secs):
         print("\nendpoint column not found, skipping per-endpoint statistics.")
         return None
 
-    endpoints = df.select(
-        pl.col("endpoint").drop_nulls().unique()
-    ).to_series().to_list()
+    endpoints = (
+        df.select(pl.col("endpoint").drop_nulls().unique()).to_series().to_list()
+    )
 
     if len(endpoints) <= 1:
         print("\nOnly one endpoint detected, skipping per-endpoint statistics.")
         return None
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"Per-Endpoint Statistics ({len(endpoints)} endpoints detected)")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
-    endpoint_stats = df.group_by(["endpoint"]).agg([
-        (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
-        (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
-        (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
-        (pl.col("duration_ns").quantile(0.95) / 1000).alias("95%_lat_us"),
-        (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
-        (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
-        (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
-        (pl.count("op") / run_time_secs).alias("ops_/_sec"),
-        ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias("xput_MBps"),
-        pl.count("op").alias("count"),
-    ]).filter(
-        pl.col("endpoint").is_not_null() & (pl.col("count") > 0)
-    ).sort("endpoint")
+    endpoint_stats = (
+        df.group_by(["endpoint"])
+        .agg(
+            [
+                (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
+                (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
+                (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
+                (pl.col("duration_ns").quantile(0.95) / 1000).alias("95%_lat_us"),
+                (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
+                (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
+                (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
+                (pl.count("op") / run_time_secs).alias("ops_/_sec"),
+                ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias(
+                    "xput_MBps"
+                ),
+                pl.count("op").alias("count"),
+            ]
+        )
+        .filter(pl.col("endpoint").is_not_null() & (pl.col("count") > 0))
+        .sort("endpoint")
+    )
 
     endpoint_stats_pd = endpoint_stats.to_pandas()
     columns_to_format = [
-        "mean_lat_us", "med._lat_us", "90%_lat_us", "95%_lat_us", "99%_lat_us",
-        "max_lat_us", "avg_obj_KB", "ops_/_sec", "xput_MBps", "count"
+        "mean_lat_us",
+        "med._lat_us",
+        "90%_lat_us",
+        "95%_lat_us",
+        "99%_lat_us",
+        "max_lat_us",
+        "avg_obj_KB",
+        "ops_/_sec",
+        "xput_MBps",
+        "count",
     ]
     for column in columns_to_format:
         if column in endpoint_stats_pd:
-            endpoint_stats_pd[column] = endpoint_stats_pd[column].map(format_with_commas)
+            endpoint_stats_pd[column] = endpoint_stats_pd[column].map(
+                format_with_commas
+            )
 
     print(endpoint_stats_pd.to_string(index=False))
 
     # Per-endpoint stats by op type
-    print(f"\nPer-Endpoint Statistics by Operation Type:")
-    print(f"{'-'*80}")
+    print("\nPer-Endpoint Statistics by Operation Type:")
+    print(f"{'-' * 80}")
 
     for op_type in ["META", "GET", "PUT"]:
         if op_type == "META":
@@ -185,33 +236,55 @@ def compute_per_endpoint_stats(df, run_time_secs):
         if op_df.height == 0:
             continue
 
-        op_ep_stats = op_df.group_by(["endpoint"]).agg([
-            (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
-            (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
-            (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
-            (pl.count("op") / run_time_secs).alias("ops_/_sec"),
-            ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias("xput_MBps"),
-            pl.count("op").alias("count"),
-        ]).filter(
-            pl.col("endpoint").is_not_null() & (pl.col("count") > 0)
-        ).sort("endpoint")
+        op_ep_stats = (
+            op_df.group_by(["endpoint"])
+            .agg(
+                [
+                    (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
+                    (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
+                    (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
+                    (pl.count("op") / run_time_secs).alias("ops_/_sec"),
+                    ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias(
+                        "xput_MBps"
+                    ),
+                    pl.count("op").alias("count"),
+                ]
+            )
+            .filter(pl.col("endpoint").is_not_null() & (pl.col("count") > 0))
+            .sort("endpoint")
+        )
 
         op_ep_stats_pd = op_ep_stats.to_pandas()
-        for column in ["mean_lat_us", "med._lat_us", "99%_lat_us", "ops_/_sec", "xput_MBps", "count"]:
+        for column in [
+            "mean_lat_us",
+            "med._lat_us",
+            "99%_lat_us",
+            "ops_/_sec",
+            "xput_MBps",
+            "count",
+        ]:
             if column in op_ep_stats_pd:
                 op_ep_stats_pd[column] = op_ep_stats_pd[column].map(format_with_commas)
 
         print(f"\n{op_type} Operations:")
         print(op_ep_stats_pd.to_string(index=False))
 
-    print(f"\n{'='*80}\n")
+    print(f"\n{'=' * 80}\n")
     return endpoint_stats
 
 
 # ─────────────────────────── Excel export ────────────────────────────────────
 
-def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
-                          cons_df=None, cons_secs=None, summary_file_data=None):
+
+def write_polarwarp_excel(
+    excel_path,
+    saved_files,
+    per_client,
+    per_endpoint,
+    cons_df=None,
+    cons_secs=None,
+    summary_file_data=None,
+):
     """Write all per-file and consolidated results to a multi-tab Excel workbook.
 
     Args:
@@ -226,8 +299,10 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
     try:
         import xlsxwriter
     except ImportError:
-        print("Warning: xlsxwriter not installed — skipping Excel export. Run: uv pip install xlsxwriter",
-              file=sys.stderr)
+        print(
+            "Warning: xlsxwriter not installed — skipping Excel export. Run: uv pip install xlsxwriter",
+            file=sys.stderr,
+        )
         return
 
     import pandas as pd
@@ -237,20 +312,26 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
     # ── helpers ──────────────────────────────────────────────────────────────
     def _short(fp):
         n = os.path.basename(fp)
-        n = n.removesuffix('.zst')
-        n = n.removesuffix('.csv') if n.endswith('.csv') else \
-            n.removesuffix('.tsv') if n.endswith('.tsv') else n
-        bi = n.find('[')
+        n = n.removesuffix(".zst")
+        n = (
+            n.removesuffix(".csv")
+            if n.endswith(".csv")
+            else n.removesuffix(".tsv")
+            if n.endswith(".tsv")
+            else n
+        )
+        bi = n.find("[")
         if bi >= 0:
             n = n[:bi]
-        return n.rstrip('-_.')[:20]
+        return n.rstrip("-_.")[:20]
 
     def _tab(base, suf):
         full = f"{base}-{suf}"
-        return full if len(full) <= 31 else f"{base[:31-len(suf)-1]}-{suf}"
+        return full if len(full) <= 31 else f"{base[: 31 - len(suf) - 1]}-{suf}"
 
     def _op_eff_times(df, run_secs):
         """Return dict op_name → effective run time (seconds) for throughput."""
+
         def _ot(fdf):
             if fdf.height == 0:
                 return run_secs
@@ -260,6 +341,7 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
                 return run_secs
             dt = (mx - mn).total_seconds()
             return dt if dt > 0.001 else run_secs
+
         mt = _ot(df.filter(pl.col("op").is_in(META_OPS)))
         gt = _ot(df.filter(pl.col("op") == "GET"))
         pt = _ot(df.filter(pl.col("op") == "PUT"))
@@ -285,48 +367,54 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
         if "thread" in df.columns:
             agg.append(pl.col("thread").n_unique().alias("max_threads"))
         result = df.group_by(["op", "bytes_bucket", "bucket_#"]).agg(agg)
-        result = result.with_columns(
-            pl.col("op").map_elements(
-                lambda op: op_map.get(op, run_secs), return_dtype=pl.Float64
-            ).alias("runtime_s")
-        ).with_columns([
-            (pl.col("count").cast(pl.Float64) / pl.col("runtime_s")).alias("ops_/_sec"),
-            (pl.col("bytes_sum") / (1024 * 1024) / pl.col("runtime_s")).alias("xput_MBps"),
-        ]).drop(["bytes_sum"])
+        result = (
+            result.with_columns(
+                pl.col("op")
+                .map_elements(
+                    lambda op: op_map.get(op, run_secs), return_dtype=pl.Float64
+                )
+                .alias("runtime_s")
+            )
+            .with_columns(
+                [
+                    (pl.col("count").cast(pl.Float64) / pl.col("runtime_s")).alias(
+                        "ops_/_sec"
+                    ),
+                    (pl.col("bytes_sum") / (1024 * 1024) / pl.col("runtime_s")).alias(
+                        "xput_MBps"
+                    ),
+                ]
+            )
+            .drop(["bytes_sum"])
+        )
         result = result.filter(pl.col("count") > 0).sort(["bucket_#", "op"])
-        col_order = (["op", "bytes_bucket", "bucket_#"] +
-                     ["mean_lat_us", "med._lat_us", "90%_lat_us", "95%_lat_us",
-                      "99%_lat_us", "max_lat_us", "avg_obj_KB", "ops_/_sec",
-                      "xput_MBps", "count"] +
-                     (["max_threads"] if "max_threads" in result.columns else []) +
-                     ["runtime_s"])
+        col_order = (
+            ["op", "bytes_bucket", "bucket_#"]
+            + [
+                "mean_lat_us",
+                "med._lat_us",
+                "90%_lat_us",
+                "95%_lat_us",
+                "99%_lat_us",
+                "max_lat_us",
+                "avg_obj_KB",
+                "ops_/_sec",
+                "xput_MBps",
+                "count",
+            ]
+            + (["max_threads"] if "max_threads" in result.columns else [])
+            + ["runtime_s"]
+        )
         return result.select([c for c in col_order if c in result.columns]).to_pandas()
 
     def _client_pd(df, run_secs):
         """Per-client overall stats (no printing)."""
         if "client_id" not in df.columns:
             return None
-        cs = df.group_by(["client_id"]).agg([
-            (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
-            (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
-            (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
-            (pl.col("duration_ns").quantile(0.95) / 1000).alias("95%_lat_us"),
-            (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
-            (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
-            (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
-            (pl.count("op").cast(pl.Float64) / run_secs).alias("ops_/_sec"),
-            ((pl.col("bytes").sum().cast(pl.Float64) / (1024 * 1024)) / run_secs).alias("xput_MBps"),
-            pl.count("op").alias("count"),
-        ]).sort("client_id")
-        return cs.to_pandas() if cs.height > 0 else None
-
-    def _endpoint_pd(df, run_secs):
-        """Per-endpoint overall stats (no printing)."""
-        if "endpoint" not in df.columns:
-            return None
-        es = (df.filter(pl.col("endpoint").is_not_null())
-                .group_by(["endpoint"])
-                .agg([
+        cs = (
+            df.group_by(["client_id"])
+            .agg(
+                [
                     (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
                     (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
                     (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
@@ -335,11 +423,44 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
                     (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
                     (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
                     (pl.count("op").cast(pl.Float64) / run_secs).alias("ops_/_sec"),
-                    ((pl.col("bytes").sum().cast(pl.Float64) / (1024 * 1024)) / run_secs).alias("xput_MBps"),
+                    (
+                        (pl.col("bytes").sum().cast(pl.Float64) / (1024 * 1024))
+                        / run_secs
+                    ).alias("xput_MBps"),
                     pl.count("op").alias("count"),
-                ])
-                .filter(pl.col("count") > 0)
-                .sort("endpoint"))
+                ]
+            )
+            .sort("client_id")
+        )
+        return cs.to_pandas() if cs.height > 0 else None
+
+    def _endpoint_pd(df, run_secs):
+        """Per-endpoint overall stats (no printing)."""
+        if "endpoint" not in df.columns:
+            return None
+        es = (
+            df.filter(pl.col("endpoint").is_not_null())
+            .group_by(["endpoint"])
+            .agg(
+                [
+                    (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
+                    (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
+                    (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
+                    (pl.col("duration_ns").quantile(0.95) / 1000).alias("95%_lat_us"),
+                    (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
+                    (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
+                    (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
+                    (pl.count("op").cast(pl.Float64) / run_secs).alias("ops_/_sec"),
+                    (
+                        (pl.col("bytes").sum().cast(pl.Float64) / (1024 * 1024))
+                        / run_secs
+                    ).alias("xput_MBps"),
+                    pl.count("op").alias("count"),
+                ]
+            )
+            .filter(pl.col("count") > 0)
+            .sort("endpoint")
+        )
         return es.to_pandas() if es.height > 0 else None
 
     def _endpoint_pd_for_op(df, run_secs, op_type):
@@ -352,26 +473,33 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
             op_df = df.filter(pl.col("op") == op_type)
         if op_df.height == 0:
             return None
-        es = (op_df.filter(pl.col("endpoint").is_not_null())
-                   .group_by(["endpoint"])
-                   .agg([
-                       (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
-                       (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
-                       (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
-                       (pl.count("op").cast(pl.Float64) / run_secs).alias("ops_/_sec"),
-                       ((pl.col("bytes").sum().cast(pl.Float64) / (1024 * 1024)) / run_secs).alias("xput_MBps"),
-                       pl.count("op").alias("count"),
-                   ])
-                   .filter(pl.col("count") > 0)
-                   .sort("endpoint"))
+        es = (
+            op_df.filter(pl.col("endpoint").is_not_null())
+            .group_by(["endpoint"])
+            .agg(
+                [
+                    (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
+                    (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
+                    (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
+                    (pl.count("op").cast(pl.Float64) / run_secs).alias("ops_/_sec"),
+                    (
+                        (pl.col("bytes").sum().cast(pl.Float64) / (1024 * 1024))
+                        / run_secs
+                    ).alias("xput_MBps"),
+                    pl.count("op").alias("count"),
+                ]
+            )
+            .filter(pl.col("count") > 0)
+            .sort("endpoint")
+        )
         return es.to_pandas() if es.height > 0 else None
 
     # ── build workbook ────────────────────────────────────────────────────────
     try:
-        wb = xlsxwriter.Workbook(excel_path, {'strings_to_urls': False})
-        bold_fmt   = wb.add_format({'bold': True, 'font_name': 'Aptos', 'font_size': 11})
-        header_fmt = wb.add_format({'bold': True, 'font_name': 'Aptos'})
-        data_fmt   = wb.add_format({'font_name': 'Aptos'})
+        wb = xlsxwriter.Workbook(excel_path, {"strings_to_urls": False})
+        bold_fmt = wb.add_format({"bold": True, "font_name": "Aptos", "font_size": 11})
+        header_fmt = wb.add_format({"bold": True, "font_name": "Aptos"})
+        data_fmt = wb.add_format({"font_name": "Aptos"})
 
         def _write_df(ws, df_pd, startrow):
             """Write a pandas DataFrame to ws starting at startrow (0-based). Returns next free row."""
@@ -381,7 +509,7 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
             for _, row in df_pd.iterrows():
                 for ci, val in enumerate(row):
                     if isinstance(val, float) and val != val:  # NaN → blank
-                        ws.write(startrow, ci, '', data_fmt)
+                        ws.write(startrow, ci, "", data_fmt)
                     elif isinstance(val, str):
                         ws.write_string(startrow, ci, val.strip(), data_fmt)
                     else:
@@ -394,7 +522,7 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
             for _, row in df_pd.iterrows():
                 for ci, val in enumerate(row):
                     if isinstance(val, float) and val != val:
-                        ws.write(startrow, ci, '', data_fmt)
+                        ws.write(startrow, ci, "", data_fmt)
                     elif isinstance(val, str):
                         ws.write_string(startrow, ci, val.strip(), data_fmt)
                     else:
@@ -457,23 +585,34 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
             # Parse ISO-8601 start strings to UTC datetimes, then compute
             # seconds-from-first-interval as an integer offset.
             df_filt = df_filt.with_columns(
-                pl.col("start").str.to_datetime(
-                    strict=False, time_unit="us", time_zone="UTC"
-                ).alias("start_dt")
+                pl.col("start")
+                .str.to_datetime(strict=False, time_unit="us", time_zone="UTC")
+                .alias("start_dt")
             )
             min_start = df_filt.select(pl.col("start_dt").min()).item()
-            df_filt = df_filt.with_columns([
-                (
-                    (pl.col("start_dt") - min_start).dt.total_microseconds() / 1_000_000.0
-                ).round(0).cast(pl.Int64).alias("seconds"),
-                (pl.col("bps") / 1_048_576.0).alias("MBps"),
-            ])
+            df_filt = df_filt.with_columns(
+                [
+                    (
+                        (pl.col("start_dt") - min_start).dt.total_microseconds()
+                        / 1_000_000.0
+                    )
+                    .round(0)
+                    .cast(pl.Int64)
+                    .alias("seconds"),
+                    (pl.col("bps") / 1_048_576.0).alias("MBps"),
+                ]
+            )
 
-            ops_list = sorted(df_filt.select(pl.col("op").unique()).to_series().to_list())
+            ops_list = sorted(
+                df_filt.select(pl.col("op").unique()).to_series().to_list()
+            )
 
             # Pivot ops_per_sec and MBps so each op becomes a column.
             ops_pivot = df_filt.pivot(
-                on="op", index="seconds", values="ops_per_sec", aggregate_function="mean"
+                on="op",
+                index="seconds",
+                values="ops_per_sec",
+                aggregate_function="mean",
             )
             ops_pivot = ops_pivot.rename(
                 {op: f"{op}_ops" for op in ops_list if op in ops_pivot.columns}
@@ -486,7 +625,9 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
                 {op: f"{op}_MBps" for op in ops_list if op in bw_pivot.columns}
             )
 
-            ts_df = ops_pivot.join(bw_pivot, on="seconds", how="full", coalesce=True).sort("seconds")
+            ts_df = ops_pivot.join(
+                bw_pivot, on="seconds", how="full", coalesce=True
+            ).sort("seconds")
             return ts_df.to_pandas(), ops_list
 
         def _write_summary_chart_tab(wb, sdf, chart_tab_name):
@@ -507,45 +648,49 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
             _write_df(ws, ts_pd, startrow=0)
 
             cols = list(ts_pd.columns)  # ['seconds', 'GET_ops', …, 'GET_MBps', …]
-            sec_ci = cols.index('seconds')
+            sec_ci = cols.index("seconds")
 
             # ── Chart 1: ops/sec over time ──────────────────────────────────────
-            chart_ops = wb.add_chart({'type': 'line'})
+            chart_ops = wb.add_chart({"type": "line"})
             for op in ops_list:
                 col_name = f"{op}_ops"
                 if col_name in cols:
                     ci = cols.index(col_name)
-                    chart_ops.add_series({
-                        'name':       op,
-                        'categories': [chart_tab_name, 1, sec_ci, n_rows, sec_ci],
-                        'values':     [chart_tab_name, 1, ci,     n_rows, ci],
-                    })
-            chart_ops.set_title({'name': 'Operations/sec over Time'})
-            chart_ops.set_x_axis({'name': 'Seconds'})
-            chart_ops.set_y_axis({'name': 'ops/sec'})
-            chart_ops.set_legend({'position': 'bottom'})
+                    chart_ops.add_series(
+                        {
+                            "name": op,
+                            "categories": [chart_tab_name, 1, sec_ci, n_rows, sec_ci],
+                            "values": [chart_tab_name, 1, ci, n_rows, ci],
+                        }
+                    )
+            chart_ops.set_title({"name": "Operations/sec over Time"})
+            chart_ops.set_x_axis({"name": "Seconds"})
+            chart_ops.set_y_axis({"name": "ops/sec"})
+            chart_ops.set_legend({"position": "bottom"})
 
             # ── Chart 2: throughput (MiB/s) — GET and PUT only ─────────────────
-            chart_bw = wb.add_chart({'type': 'line'})
-            for op in (o for o in ops_list if o in ('GET', 'PUT')):
+            chart_bw = wb.add_chart({"type": "line"})
+            for op in (o for o in ops_list if o in ("GET", "PUT")):
                 col_name = f"{op}_MBps"
                 if col_name in cols:
                     ci = cols.index(col_name)
-                    chart_bw.add_series({
-                        'name':       op,
-                        'categories': [chart_tab_name, 1, sec_ci, n_rows, sec_ci],
-                        'values':     [chart_tab_name, 1, ci,     n_rows, ci],
-                    })
-            chart_bw.set_title({'name': 'Throughput (MiB/s) over Time'})
-            chart_bw.set_x_axis({'name': 'Seconds'})
-            chart_bw.set_y_axis({'name': 'MiB/s'})
-            chart_bw.set_legend({'position': 'bottom'})
+                    chart_bw.add_series(
+                        {
+                            "name": op,
+                            "categories": [chart_tab_name, 1, sec_ci, n_rows, sec_ci],
+                            "values": [chart_tab_name, 1, ci, n_rows, ci],
+                        }
+                    )
+            chart_bw.set_title({"name": "Throughput (MiB/s) over Time"})
+            chart_bw.set_x_axis({"name": "Seconds"})
+            chart_bw.set_y_axis({"name": "MiB/s"})
+            chart_bw.set_legend({"position": "bottom"})
 
             # Place both charts below the data, side by side
             chart_row = n_rows + 3
             if any(f"{op}_ops" in cols for op in ops_list):
                 ws.insert_chart(chart_row, 0, chart_ops)
-            if any(f"{op}_MBps" in cols for op in ('GET', 'PUT')):
+            if any(f"{op}_MBps" in cols for op in ("GET", "PUT")):
                 ws.insert_chart(chart_row, 8, chart_bw)
 
         # Pre-compute unique short names to avoid worksheet name collisions when
@@ -553,7 +698,7 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
         if single:
             unique_shorts = [None]
         else:
-            raw_shorts = [_short(e['path']) for e in saved_files]
+            raw_shorts = [_short(e["path"]) for e in saved_files]
             tally = {}
             for n in raw_shorts:
                 tally[n] = tally.get(n, 0) + 1
@@ -568,36 +713,43 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
                     unique_shorts.append(n)
 
         for i, entry in enumerate(saved_files):
-            fp, df, run_secs = entry['path'], entry['df'], entry['run_secs']
+            _, df, run_secs = entry["path"], entry["df"], entry["run_secs"]
             short = unique_shorts[i]
-            results_tab = 'Results' if single else _tab(short, 'Results')
+            results_tab = "Results" if single else _tab(short, "Results")
             _write_results_tab(wb.add_worksheet(results_tab), df, run_secs)
 
             if per_client or per_endpoint:
-                detail_tab = 'Detail' if single else _tab(short, 'Detail')
+                detail_tab = "Detail" if single else _tab(short, "Detail")
                 _write_detail_tab(wb.add_worksheet(detail_tab), df, run_secs)
 
         if cons_df is not None and not cons_df.is_empty():
-            _write_results_tab(wb.add_worksheet('Consolidated'), cons_df, cons_secs)
+            _write_results_tab(wb.add_worksheet("Consolidated"), cons_df, cons_secs)
             if per_client or per_endpoint:
-                _write_detail_tab(wb.add_worksheet('Consol-Detail'), cons_df, cons_secs)
+                _write_detail_tab(wb.add_worksheet("Consol-Detail"), cons_df, cons_secs)
 
         # Write one tab per summary file
         if summary_file_data:
-            import pandas as pd  # already imported above but guard just in case
             summary_cols = [
-                "op", "segments",
-                "mean_MBps", "p50_MBps", "p90_MBps", "p99_MBps",
-                "min_MBps", "max_MBps", "stdev_MBps",
-                "mean_ops/s", "p50_ops/s", "p99_ops/s",
+                "op",
+                "segments",
+                "mean_MBps",
+                "p50_MBps",
+                "p90_MBps",
+                "p99_MBps",
+                "min_MBps",
+                "max_MBps",
+                "stdev_MBps",
+                "mean_ops/s",
+                "p50_ops/s",
+                "p99_ops/s",
                 "total_errors",
             ]
             for entry in summary_file_data:
-                sfp, sdf = entry['path'], entry['df']
+                sfp, sdf = entry["path"], entry["df"]
                 short = _short(sfp)
 
                 # Summary statistics tab (aggregate stats per op)
-                tab_name = _tab(short, 'Summary')
+                tab_name = _tab(short, "Summary")
                 ws = wb.add_worksheet(tab_name)
                 stats_pl = _compute_summary_stats_df(sdf)
                 stats_pd = stats_pl.to_pandas()
@@ -606,13 +758,15 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
                 _write_df(ws, stats_pd[ordered], startrow=0)
 
                 # Charts tab (time-series line charts)
-                _write_summary_chart_tab(wb, sdf, _tab(short, 'Charts'))
+                _write_summary_chart_tab(wb, sdf, _tab(short, "Charts"))
 
         wb.close()
         print(f"\nExcel file written: {excel_path}")
 
     except Exception as e:
-        print(f"Warning: Failed to write Excel file '{excel_path}': {e}", file=sys.stderr)
+        print(
+            f"Warning: Failed to write Excel file '{excel_path}': {e}", file=sys.stderr
+        )
 
 
 def compute_summary_rows(df, run_time_secs):
@@ -642,7 +796,7 @@ def compute_summary_rows(df, run_time_secs):
 
         # Compute per-op time range (issue #14: correct for non-overlapping workloads)
         min_start = category_df.select(pl.col("start").min()).item()
-        max_end   = category_df.select(pl.col("end").max()).item()
+        max_end = category_df.select(pl.col("end").max()).item()
         if min_start is not None and max_end is not None:
             op_time = (max_end - min_start).total_seconds()
             op_time = op_time if op_time > 0.001 else run_time_secs
@@ -650,21 +804,29 @@ def compute_summary_rows(df, run_time_secs):
             op_time = run_time_secs
 
         # Concurrency: distinct thread IDs for this op category (issue #16)
-        n_threads = int(category_df.select(pl.col("thread").n_unique()).item()) if has_thread else 0
+        n_threads = (
+            int(category_df.select(pl.col("thread").n_unique()).item())
+            if has_thread
+            else 0
+        )
 
         # Compute statistically valid percentiles on ALL raw data for this category
-        stats = category_df.select([
-            (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
-            (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
-            (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
-            (pl.col("duration_ns").quantile(0.95) / 1000).alias("95%_lat_us"),
-            (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
-            (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
-            (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
-            (pl.count("op").cast(pl.Float64) / op_time).alias("ops_/_sec"),
-            ((pl.col("bytes").sum().cast(pl.Float64) / (1024 * 1024)) / op_time).alias("xput_MBps"),
-            pl.count("op").alias("count"),
-        ])
+        stats = category_df.select(
+            [
+                (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
+                (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
+                (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
+                (pl.col("duration_ns").quantile(0.95) / 1000).alias("95%_lat_us"),
+                (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
+                (pl.col("duration_ns").max() / 1000).alias("max_lat_us"),
+                (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
+                (pl.count("op").cast(pl.Float64) / op_time).alias("ops_/_sec"),
+                (
+                    (pl.col("bytes").sum().cast(pl.Float64) / (1024 * 1024)) / op_time
+                ).alias("xput_MBps"),
+                pl.count("op").alias("count"),
+            ]
+        )
 
         row = stats.row(0, named=True)
         row["op"] = category_name
@@ -680,23 +842,37 @@ def compute_summary_rows(df, run_time_secs):
 def print_summary_rows(summary_rows, columns_to_format):
     """Print summary rows with formatting."""
     import pandas as pd
-    
+
     if not summary_rows:
         return
-    
+
     print()  # Separator line
-    
+
     summary_df = pd.DataFrame(summary_rows)
     # Reorder columns to match main output
-    column_order = ["op", "bytes_bucket", "bucket_#", "mean_lat_us", "med._lat_us",
-                    "90%_lat_us", "95%_lat_us", "99%_lat_us", "max_lat_us",
-                    "avg_obj_KB", "ops_/_sec", "xput_MBps", "count", "max_threads", "runtime_s"]
+    column_order = [
+        "op",
+        "bytes_bucket",
+        "bucket_#",
+        "mean_lat_us",
+        "med._lat_us",
+        "90%_lat_us",
+        "95%_lat_us",
+        "99%_lat_us",
+        "max_lat_us",
+        "avg_obj_KB",
+        "ops_/_sec",
+        "xput_MBps",
+        "count",
+        "max_threads",
+        "runtime_s",
+    ]
     summary_df = summary_df[[c for c in column_order if c in summary_df.columns]]
-    
+
     for column in columns_to_format:
         if column in summary_df:
             summary_df[column] = summary_df[column].map(format_with_commas)
-    
+
     # Print without index, matching main output style
     print(summary_df.to_string(index=False))
 
@@ -705,19 +881,29 @@ def print_summary_rows(summary_rows, columns_to_format):
 
 script_name = sys.argv[0]
 
+
 def print_usage():
     """Print usage information."""
     print(f"Usage: python {script_name} [OPTIONS] <file1> [file2 ...]")
-    print(f"\nOptions:")
-    print(f"  --skip=<time>  Skip specified time from start of each file")
-    print(f"                 Format: <number>s (seconds) or <number>m (minutes)")
-    print(f"                 Example: --skip=90s or --skip=5m")
-    print(f"  --per-client   Generate per-client statistics (in addition to overall stats)")
-    print(f"  --per-endpoint Generate per-endpoint statistics (in addition to overall stats)")
-    print(f"  --excel[=FILE] Export results to Excel file (default name derived from input file)")
-    print(f"  --help         Show this help message and exit")
-    print(f"\nArguments:")
-    print(f"  file1 file2... One or more oplog files to process (TSV/CSV, optionally .zst compressed)")
+    print("\nOptions:")
+    print("  --skip=<time>  Skip specified time from start of each file")
+    print("                 Format: <number>s (seconds) or <number>m (minutes)")
+    print("                 Example: --skip=90s or --skip=5m")
+    print(
+        "  --per-client   Generate per-client statistics (in addition to overall stats)"
+    )
+    print(
+        "  --per-endpoint Generate per-endpoint statistics (in addition to overall stats)"
+    )
+    print(
+        "  --excel[=FILE] Export results to Excel file (default name derived from input file)"
+    )
+    print("  --help         Show this help message and exit")
+    print("\nArguments:")
+    print(
+        "  file1 file2... One or more oplog files to process (TSV/CSV, optionally .zst compressed)"
+    )
+
 
 def print_error(message):
     """Print error message and exit."""
@@ -736,24 +922,24 @@ def detect_file_type(file_path):
         probe = pl.read_csv(
             file_path,
             n_rows=1,
-            separator='\t',
-            comment_prefix='#',
+            separator="\t",
+            comment_prefix="#",
             ignore_errors=True,
             glob=False,
         )
     except Exception as e:
         print_error(f"Cannot read file '{file_path}' to detect type: {e}")
     cols = probe.columns
-    if 'bps' in cols and 'ops_per_sec' in cols:
-        return 'summary'
-    elif 'duration_ns' in cols:
-        return 'trace'
-    else:
-        print_error(
-            f"File '{file_path}' has unrecognized header columns: {cols}\n"
-            f"Expected either trace columns (duration_ns, …) or "
-            f"summary columns (bps, ops_per_sec, …)"
-        )
+    if "bps" in cols and "ops_per_sec" in cols:
+        return "summary"
+    if "duration_ns" in cols:
+        return "trace"
+    print_error(
+        f"File '{file_path}' has unrecognized header columns: {cols}\n"
+        f"Expected either trace columns (duration_ns, …) or "
+        f"summary columns (bps, ops_per_sec, …)"
+    )
+    return None  # unreachable: print_error calls sys.exit()
 
 
 def _compute_summary_stats_df(df):
@@ -763,20 +949,22 @@ def _compute_summary_stats_df(df):
     """
     stats = (
         df.group_by("op")
-        .agg([
-            pl.col("bps").count().alias("segments"),
-            (pl.col("bps").mean()          / 1_048_576).alias("mean_MBps"),
-            (pl.col("bps").median()         / 1_048_576).alias("p50_MBps"),
-            (pl.col("bps").quantile(0.90)   / 1_048_576).alias("p90_MBps"),
-            (pl.col("bps").quantile(0.99)   / 1_048_576).alias("p99_MBps"),
-            (pl.col("bps").min()            / 1_048_576).alias("min_MBps"),
-            (pl.col("bps").max()            / 1_048_576).alias("max_MBps"),
-            (pl.col("bps").std(ddof=1)      / 1_048_576).alias("stdev_MBps"),
-            pl.col("ops_per_sec").mean().alias("mean_ops/s"),
-            pl.col("ops_per_sec").median().alias("p50_ops/s"),
-            pl.col("ops_per_sec").quantile(0.99).alias("p99_ops/s"),
-            pl.col("errors").cast(pl.Int64).sum().alias("total_errors"),
-        ])
+        .agg(
+            [
+                pl.col("bps").count().alias("segments"),
+                (pl.col("bps").mean() / 1_048_576).alias("mean_MBps"),
+                (pl.col("bps").median() / 1_048_576).alias("p50_MBps"),
+                (pl.col("bps").quantile(0.90) / 1_048_576).alias("p90_MBps"),
+                (pl.col("bps").quantile(0.99) / 1_048_576).alias("p99_MBps"),
+                (pl.col("bps").min() / 1_048_576).alias("min_MBps"),
+                (pl.col("bps").max() / 1_048_576).alias("max_MBps"),
+                (pl.col("bps").std(ddof=1) / 1_048_576).alias("stdev_MBps"),
+                pl.col("ops_per_sec").mean().alias("mean_ops/s"),
+                pl.col("ops_per_sec").median().alias("p50_ops/s"),
+                pl.col("ops_per_sec").quantile(0.99).alias("p99_ops/s"),
+                pl.col("errors").cast(pl.Int64).sum().alias("total_errors"),
+            ]
+        )
         .sort("op")
     )
     # Re-sort: non-TOTAL rows first, TOTAL row last
@@ -824,11 +1012,16 @@ def compute_and_display_summary_stats(df):
 def _excel_derive_path(paths):
     if len(paths) == 1:
         name = os.path.basename(paths[0])
-        name = name.removesuffix('.zst')
-        name = name.removesuffix('.csv') if name.endswith('.csv') else name.removesuffix('.tsv') if name.endswith('.tsv') else name
-        return os.path.join(os.path.dirname(paths[0]) or '.', name + '.xlsx')
-    return 'polarwarp-results.xlsx'
-
+        name = name.removesuffix(".zst")
+        name = (
+            name.removesuffix(".csv")
+            if name.endswith(".csv")
+            else name.removesuffix(".tsv")
+            if name.endswith(".tsv")
+            else name
+        )
+        return os.path.join(os.path.dirname(paths[0]) or ".", name + ".xlsx")
+    return "polarwarp-results.xlsx"
 
 
 if __name__ == "__main__":
@@ -846,7 +1039,7 @@ if __name__ == "__main__":
     skip_time = None
     per_client_stats = False
     per_endpoint_stats = False
-    excel_path = None   # None = no Excel; string = path to write
+    excel_path = None  # None = no Excel; string = path to write
     file_paths = []
     skip_pattern = re.compile(r"^--skip=(\d+)([sm])$")
     excel_pattern = re.compile(r"^--excel(?:=(.+))?$")
@@ -864,10 +1057,15 @@ if __name__ == "__main__":
             else:
                 excel_m = excel_pattern.match(arg)
                 if excel_m:
-                    excel_path = excel_m.group(1)  # may be None if --excel with no value
+                    excel_path = excel_m.group(
+                        1
+                    )  # may be None if --excel with no value
                     if excel_path is None:
                         excel_path = ""  # sentinel: derive name later
-                    print(f"Excel export enabled" + (f": {excel_path}" if excel_path else ""))
+                    print(
+                        "Excel export enabled"
+                        + (f": {excel_path}" if excel_path else "")
+                    )
                     continue
                 match = skip_pattern.match(arg)
                 if match:
@@ -884,7 +1082,9 @@ if __name__ == "__main__":
                     except ValueError as e:
                         print_error(f"Invalid skip value: {e}")
                 else:
-                    print_error(f"Unknown option: {arg}\nValid options: --skip=<time>, --per-client, --per-endpoint, --excel[=FILE], --help")
+                    print_error(
+                        f"Unknown option: {arg}\nValid options: --skip=<time>, --per-client, --per-endpoint, --excel[=FILE], --help"
+                    )
         else:
             # This is a file path
             file_paths.append(arg)
@@ -906,7 +1106,7 @@ if __name__ == "__main__":
     saved_file_dfs = []  # list of dict: {path, df, run_secs}
 
     # Summary-file data collected separately for Excel export
-    summary_file_data = []   # list of dict: {path, df}
+    summary_file_data = []  # list of dict: {path, df}
     any_summary_file = False
     any_trace_file = False
 
@@ -922,7 +1122,7 @@ if __name__ == "__main__":
 
     # Create empty dataFrame for consolidate results
     consolidated_df = pl.DataFrame()
-    consolidated_throughput_df = pl.DataFrame() 
+    consolidated_throughput_df = pl.DataFrame()
     consolidated_throughputs = []
 
     #
@@ -935,31 +1135,42 @@ if __name__ == "__main__":
 
             # Detect file type and route summary files to their own handler
             file_type = detect_file_type(file_path)
-            if file_type == 'summary':
+            if file_type == "summary":
                 any_summary_file = True
                 print(f"Summary Statistics for: {file_path}")
                 summary_df = pl.read_csv(
                     file_path,
-                    separator='\t',
-                    comment_prefix='#',
+                    separator="\t",
+                    comment_prefix="#",
                     ignore_errors=True,
                     glob=False,
                 )
-                required_summary = ["op", "start", "end", "bps", "ops_per_sec", "errors"]
+                required_summary = [
+                    "op",
+                    "start",
+                    "end",
+                    "bps",
+                    "ops_per_sec",
+                    "errors",
+                ]
                 missing_s = [c for c in required_summary if c not in summary_df.columns]
                 if missing_s:
-                    print_error(f"Summary file '{file_path}' is missing required columns: {', '.join(missing_s)}")
-                summary_df = summary_df.with_columns([
-                    pl.col("bps").cast(pl.Float64),
-                    pl.col("ops_per_sec").cast(pl.Float64),
-                ])
+                    print_error(
+                        f"Summary file '{file_path}' is missing required columns: {', '.join(missing_s)}"
+                    )
+                summary_df = summary_df.with_columns(
+                    [
+                        pl.col("bps").cast(pl.Float64),
+                        pl.col("ops_per_sec").cast(pl.Float64),
+                    ]
+                )
                 seg_count = summary_df.height
                 start_val = summary_df.select(pl.col("start").first()).item()
-                end_val   = summary_df.select(pl.col("end").last()).item()
+                end_val = summary_df.select(pl.col("end").last()).item()
                 print(f"Time range: {start_val} → {end_val}  ({seg_count} segments)")
                 compute_and_display_summary_stats(summary_df)
                 if excel_path is not None:
-                    summary_file_data.append({'path': file_path, 'df': summary_df})
+                    summary_file_data.append({"path": file_path, "df": summary_df})
                 process_elapsed = time.time() - process_start
                 print(f"\nProcessed in {process_elapsed:.2f} seconds")
                 continue
@@ -969,7 +1180,9 @@ if __name__ == "__main__":
             # Try to read the file with error handling
             # glob=False prevents polars from treating brackets in filenames as glob patterns
             try:
-                df = pl.read_csv(file_path, ignore_errors=True, separator='\t', glob=False)
+                df = pl.read_csv(
+                    file_path, ignore_errors=True, separator="\t", glob=False
+                )
             except Exception as e:
                 print_error(f"Failed to read file '{file_path}': {e}")
 
@@ -981,14 +1194,28 @@ if __name__ == "__main__":
             required_columns = ["start", "end", "op", "bytes", "duration_ns"]
             missing_columns = [col for col in required_columns if col not in df.columns]
             if missing_columns:
-                print_error(f"File '{file_path}' is missing required columns: {', '.join(missing_columns)}")
+                print_error(
+                    f"File '{file_path}' is missing required columns: {', '.join(missing_columns)}"
+                )
 
-            # Note: parsing the ISO 8601 time is a bit tricky.  If the value ends in a literal capital "Z", then it may cause problems.  
+            # Note: parsing the ISO 8601 time is a bit tricky.  If the value ends in a literal capital "Z", then it may cause problems.
             try:
-                df = df.with_columns([
-                    pl.col("start").str.replace("Z$", "+00:00").str.strptime(pl.Datetime, "%Y-%m-%dT%H:%M:%S%.f%z", strict=False).alias("start"),
-                    pl.col("end").str.replace("Z$", "+00:00").str.strptime(pl.Datetime, "%Y-%m-%dT%H:%M:%S%.f%z", strict=False).alias("end"),
-                ])
+                df = df.with_columns(
+                    [
+                        pl.col("start")
+                        .str.replace("Z$", "+00:00")
+                        .str.strptime(
+                            pl.Datetime, "%Y-%m-%dT%H:%M:%S%.f%z", strict=False
+                        )
+                        .alias("start"),
+                        pl.col("end")
+                        .str.replace("Z$", "+00:00")
+                        .str.strptime(
+                            pl.Datetime, "%Y-%m-%dT%H:%M:%S%.f%z", strict=False
+                        )
+                        .alias("end"),
+                    ]
+                )
             except Exception as e:
                 print_error(f"Failed to parse timestamps in file '{file_path}': {e}")
 
@@ -1010,7 +1237,9 @@ if __name__ == "__main__":
 
             # If this error is raised, likely a time parsing issue
             if start_time is None or end_time is None:
-                print_error(f"Could not determine start/end time in file '{file_path}'. Check timestamp format (ISO 8601 expected)")
+                print_error(
+                    f"Could not determine start/end time in file '{file_path}'. Check timestamp format (ISO 8601 expected)"
+                )
 
         except KeyboardInterrupt:
             print("\n\nInterrupted by user", file=sys.stderr)
@@ -1029,63 +1258,96 @@ if __name__ == "__main__":
             print(f"Skipping rows with 'start' <= {threshold_time}.")
             df = df.filter(pl.col("start") > threshold_time)
 
-        print(f"The file run time in h:mm:ss is {run_time}, time in seconds is: {run_time_secs}")
+        print(
+            f"The file run time in h:mm:ss is {run_time}, time in seconds is: {run_time_secs}"
+        )
 
-    # Define the bucket order (matching sai3-bench/polarwarp-rs)
-        bucket_order = ["zero", "1B-8KiB", "8KiB-64KiB", "64KiB-512KiB", "512KiB-4MiB", "4MiB-32MiB", "32MiB-256MiB", "256MiB-2GiB", ">2GiB"]
+        # Define the bucket order (matching sai3-bench/polarwarp-rs)
+        bucket_order = [
+            "zero",
+            "1B-8KiB",
+            "8KiB-64KiB",
+            "64KiB-512KiB",
+            "512KiB-4MiB",
+            "4MiB-32MiB",
+            "32MiB-256MiB",
+            "256MiB-2GiB",
+            ">2GiB",
+        ]
 
-    # Size bucket boundaries (matching sai3-bench)
-        BUCKET_8K = 8 * 1024           # 8 KiB
-        BUCKET_64K = 64 * 1024         # 64 KiB
-        BUCKET_512K = 512 * 1024       # 512 KiB
-        BUCKET_4M = 4 * 1024 * 1024    # 4 MiB
+        # Size bucket boundaries (matching sai3-bench)
+        BUCKET_8K = 8 * 1024  # 8 KiB
+        BUCKET_64K = 64 * 1024  # 64 KiB
+        BUCKET_512K = 512 * 1024  # 512 KiB
+        BUCKET_4M = 4 * 1024 * 1024  # 4 MiB
         BUCKET_32M = 32 * 1024 * 1024  # 32 MiB
         BUCKET_256M = 256 * 1024 * 1024  # 256 MiB
         BUCKET_2G = 2 * 1024 * 1024 * 1024  # 2 GiB
 
-    # Create buckets for byte ranges (matching sai3-bench bucket definitions)
-        df = df.with_columns([
-            pl.when(pl.col("bytes") == 0).then(pl.lit("zero"))
-            .when((pl.col("bytes") >= 1) & (pl.col("bytes") < BUCKET_8K)).then(pl.lit("1B-8KiB"))
-            .when((pl.col("bytes") >= BUCKET_8K) & (pl.col("bytes") < BUCKET_64K)).then(pl.lit("8KiB-64KiB"))
-            .when((pl.col("bytes") >= BUCKET_64K) & (pl.col("bytes") < BUCKET_512K)).then(pl.lit("64KiB-512KiB"))
-            .when((pl.col("bytes") >= BUCKET_512K) & (pl.col("bytes") < BUCKET_4M)).then(pl.lit("512KiB-4MiB"))
-            .when((pl.col("bytes") >= BUCKET_4M) & (pl.col("bytes") < BUCKET_32M)).then(pl.lit("4MiB-32MiB"))
-            .when((pl.col("bytes") >= BUCKET_32M) & (pl.col("bytes") < BUCKET_256M)).then(pl.lit("32MiB-256MiB"))
-            .when((pl.col("bytes") >= BUCKET_256M) & (pl.col("bytes") < BUCKET_2G)).then(pl.lit("256MiB-2GiB"))
-            .otherwise(pl.lit(">2GiB")).alias("bytes_bucket"),
-            pl.when(pl.col("bytes") == 0).then(0)
-            .when((pl.col("bytes") >= 1) & (pl.col("bytes") < BUCKET_8K)).then(1)
-            .when((pl.col("bytes") >= BUCKET_8K) & (pl.col("bytes") < BUCKET_64K)).then(2)
-            .when((pl.col("bytes") >= BUCKET_64K) & (pl.col("bytes") < BUCKET_512K)).then(3)
-            .when((pl.col("bytes") >= BUCKET_512K) & (pl.col("bytes") < BUCKET_4M)).then(4)
-            .when((pl.col("bytes") >= BUCKET_4M) & (pl.col("bytes") < BUCKET_32M)).then(5)
-            .when((pl.col("bytes") >= BUCKET_32M) & (pl.col("bytes") < BUCKET_256M)).then(6)
-            .when((pl.col("bytes") >= BUCKET_256M) & (pl.col("bytes") < BUCKET_2G)).then(7)
-            .otherwise(8).alias("bucket_#")
-        ])
+        # Create buckets for byte ranges (matching sai3-bench bucket definitions)
+        df = df.with_columns(
+            [
+                pl.when(pl.col("bytes") == 0)
+                .then(pl.lit("zero"))
+                .when((pl.col("bytes") >= 1) & (pl.col("bytes") < BUCKET_8K))
+                .then(pl.lit("1B-8KiB"))
+                .when((pl.col("bytes") >= BUCKET_8K) & (pl.col("bytes") < BUCKET_64K))
+                .then(pl.lit("8KiB-64KiB"))
+                .when((pl.col("bytes") >= BUCKET_64K) & (pl.col("bytes") < BUCKET_512K))
+                .then(pl.lit("64KiB-512KiB"))
+                .when((pl.col("bytes") >= BUCKET_512K) & (pl.col("bytes") < BUCKET_4M))
+                .then(pl.lit("512KiB-4MiB"))
+                .when((pl.col("bytes") >= BUCKET_4M) & (pl.col("bytes") < BUCKET_32M))
+                .then(pl.lit("4MiB-32MiB"))
+                .when((pl.col("bytes") >= BUCKET_32M) & (pl.col("bytes") < BUCKET_256M))
+                .then(pl.lit("32MiB-256MiB"))
+                .when((pl.col("bytes") >= BUCKET_256M) & (pl.col("bytes") < BUCKET_2G))
+                .then(pl.lit("256MiB-2GiB"))
+                .otherwise(pl.lit(">2GiB"))
+                .alias("bytes_bucket"),
+                pl.when(pl.col("bytes") == 0)
+                .then(0)
+                .when((pl.col("bytes") >= 1) & (pl.col("bytes") < BUCKET_8K))
+                .then(1)
+                .when((pl.col("bytes") >= BUCKET_8K) & (pl.col("bytes") < BUCKET_64K))
+                .then(2)
+                .when((pl.col("bytes") >= BUCKET_64K) & (pl.col("bytes") < BUCKET_512K))
+                .then(3)
+                .when((pl.col("bytes") >= BUCKET_512K) & (pl.col("bytes") < BUCKET_4M))
+                .then(4)
+                .when((pl.col("bytes") >= BUCKET_4M) & (pl.col("bytes") < BUCKET_32M))
+                .then(5)
+                .when((pl.col("bytes") >= BUCKET_32M) & (pl.col("bytes") < BUCKET_256M))
+                .then(6)
+                .when((pl.col("bytes") >= BUCKET_256M) & (pl.col("bytes") < BUCKET_2G))
+                .then(7)
+                .otherwise(8)
+                .alias("bucket_#"),
+            ]
+        )
 
-    # Pre-compute per-operation time ranges (issue #14: correct for non-overlapping workloads)
-        def _op_time(op_df):
+        # Pre-compute per-operation time ranges (issue #14: correct for non-overlapping workloads)
+        # Use default-argument capture to avoid cell-var-from-loop (run_time_secs is a loop var)
+        def _op_time(op_df, _t=run_time_secs):
             if op_df.height == 0:
-                return run_time_secs
+                return _t
             min_s = op_df.select(pl.col("start").min()).item()
             max_e = op_df.select(pl.col("end").max()).item()
             if min_s is None or max_e is None:
-                return run_time_secs
+                return _t
             dt = (max_e - min_s).total_seconds()
-            return dt if dt > 0.001 else run_time_secs
+            return dt if dt > 0.001 else _t
 
         _meta_time = _op_time(df.filter(pl.col("op").is_in(META_OPS)))
-        _get_time  = _op_time(df.filter(pl.col("op") == "GET"))
-        _put_time  = _op_time(df.filter(pl.col("op") == "PUT"))
+        _get_time = _op_time(df.filter(pl.col("op") == "GET"))
+        _put_time = _op_time(df.filter(pl.col("op") == "PUT"))
 
         # Build op -> run_time mapping
         _op_time_map = {op: _meta_time for op in META_OPS}
         _op_time_map["GET"] = _get_time
         _op_time_map["PUT"] = _put_time
 
-    # Now group the results by operation type and our bucket sizes
+        # Now group the results by operation type and our bucket sizes
         _agg_exprs = [
             (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
             (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
@@ -1103,21 +1365,42 @@ if __name__ == "__main__":
         result = df.group_by(["op", "bytes_bucket", "bucket_#"]).agg(_agg_exprs)
 
         # Compute per-op throughput rates using the correct per-op time range (issue #14)
-        result = result.with_columns(
-            pl.col("op").map_elements(lambda op: _op_time_map.get(op, run_time_secs), return_dtype=pl.Float64).alias("runtime_s")
-        ).with_columns([
-            (pl.col("count").cast(pl.Float64) / pl.col("runtime_s")).alias("ops_/_sec"),
-            (pl.col("bytes_sum").cast(pl.Float64) / (1024 * 1024) / pl.col("runtime_s")).alias("xput_MBps"),
-        ]).drop(["bytes_sum"])
+        result = (
+            result.with_columns(
+                pl.col("op")
+                .map_elements(
+                    lambda op, _m=_op_time_map, _t=run_time_secs: _m.get(op, _t),
+                    return_dtype=pl.Float64,
+                )
+                .alias("runtime_s")
+            )
+            .with_columns(
+                [
+                    (pl.col("count").cast(pl.Float64) / pl.col("runtime_s")).alias(
+                        "ops_/_sec"
+                    ),
+                    (
+                        pl.col("bytes_sum").cast(pl.Float64)
+                        / (1024 * 1024)
+                        / pl.col("runtime_s")
+                    ).alias("xput_MBps"),
+                ]
+            )
+            .drop(["bytes_sum"])
+        )
 
         # Ensure throughput is in Float64 format for consistency
         result = result.with_columns(pl.col("xput_MBps").cast(pl.Float64))
 
         # Calculate throughput metrics for the current file (used in multi-file consolidation)
-        throughput_metrics = df.group_by("op", "bytes_bucket").agg([
-            ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias("xput_MBps"),
-            pl.count("op").alias("count"),
-        ])
+        throughput_metrics = df.group_by("op", "bytes_bucket").agg(
+            [
+                ((pl.col("bytes").sum() / (1024 * 1024)) / run_time_secs).alias(
+                    "xput_MBps"
+                ),
+                pl.count("op").alias("count"),
+            ]
+        )
 
         # Ensure 'op' column is of type Utf8
         throughput_metrics = throughput_metrics.with_columns(pl.col("op").cast(pl.Utf8))
@@ -1128,14 +1411,30 @@ if __name__ == "__main__":
         final_result = final_result.filter(pl.col("count") > 0)
 
         # Reorder columns (runtime_s last)
-        _col_order = ["op", "bytes_bucket", "bucket_#", "mean_lat_us", "med._lat_us",
-                      "90%_lat_us", "95%_lat_us", "99%_lat_us", "max_lat_us",
-                      "avg_obj_KB", "ops_/_sec", "xput_MBps", "count", "max_threads", "runtime_s"]
-        final_result = final_result.select([c for c in _col_order if c in final_result.columns])
+        _col_order = [
+            "op",
+            "bytes_bucket",
+            "bucket_#",
+            "mean_lat_us",
+            "med._lat_us",
+            "90%_lat_us",
+            "95%_lat_us",
+            "99%_lat_us",
+            "max_lat_us",
+            "avg_obj_KB",
+            "ops_/_sec",
+            "xput_MBps",
+            "count",
+            "max_threads",
+            "runtime_s",
+        ]
+        final_result = final_result.select(
+            [c for c in _col_order if c in final_result.columns]
+        )
 
         final_result_pd = final_result.to_pandas()
 
-    # List of columns to send to the pretty comma-fyer
+        # List of columns to send to the pretty comma-fyer
         columns_to_format = [
             "med._lat_us",
             "90%_lat_us",
@@ -1150,9 +1449,13 @@ if __name__ == "__main__":
         ]
         for column in columns_to_format:
             if column in final_result_pd:
-                final_result_pd[column] = final_result_pd[column].map(format_with_commas)
+                final_result_pd[column] = final_result_pd[column].map(
+                    format_with_commas
+                )
         if "runtime_s" in final_result_pd:
-            final_result_pd["runtime_s"] = final_result_pd["runtime_s"].map(lambda x: f"{x:.1f}")
+            final_result_pd["runtime_s"] = final_result_pd["runtime_s"].map(
+                lambda x: f"{x:.1f}"
+            )
 
         print(final_result_pd.to_string(index=False))
 
@@ -1174,14 +1477,15 @@ if __name__ == "__main__":
 
         # Save data for Excel export
         if excel_path is not None:
-            saved_file_dfs.append({'path': file_path, 'df': df, 'run_secs': run_time_secs})
+            saved_file_dfs.append(
+                {"path": file_path, "df": df, "run_secs": run_time_secs}
+            )
 
         consolidated_df = pl.concat([consolidated_df, df])
 
         # Append the metrics to consolidated_throughputs
-        #consolidated_throughput_df = pl.concat([consolidated_throughput_df, throughput_metrics])
+        # consolidated_throughput_df = pl.concat([consolidated_throughput_df, throughput_metrics])
         consolidated_throughputs.append(throughput_metrics)
-
 
     # Done processing each file
 
@@ -1197,7 +1501,10 @@ if __name__ == "__main__":
     if not any_trace_file:
         if excel_path is not None:
             write_polarwarp_excel(
-                excel_path, saved_file_dfs, per_client_stats, per_endpoint_stats,
+                excel_path,
+                saved_file_dfs,
+                per_client_stats,
+                per_endpoint_stats,
                 summary_file_data=summary_file_data,
             )
         sys.exit(0)
@@ -1206,12 +1513,15 @@ if __name__ == "__main__":
     if len(file_paths) == 1:
         if excel_path is not None:
             write_polarwarp_excel(
-                excel_path, saved_file_dfs, per_client_stats, per_endpoint_stats,
+                excel_path,
+                saved_file_dfs,
+                per_client_stats,
+                per_endpoint_stats,
                 summary_file_data=summary_file_data,
             )
         sys.exit(0)
 
-    print(f"\nDone Processing Files... Consolidating Results")
+    print("\nDone Processing Files... Consolidating Results")
 
     # Compute overlap (latest-start / earliest-end) and union (earliest-start / latest-end)
     # across all files. Jaccard = overlap / union is in [0, 100%].
@@ -1219,33 +1529,48 @@ if __name__ == "__main__":
         print(f"  File time range: {fp}  (duration: {fe - fs})")
 
     overlap_start = max(r[1] for r in file_ranges)
-    overlap_end   = min(r[2] for r in file_ranges)
-    union_start   = min(r[1] for r in file_ranges)
-    union_end     = max(r[2] for r in file_ranges)
+    overlap_end = min(r[2] for r in file_ranges)
+    union_start = min(r[1] for r in file_ranges)
+    union_end = max(r[2] for r in file_ranges)
 
     overlap_secs = max(0.0, (overlap_end - overlap_start).total_seconds())
-    union_secs   = (union_end - union_start).total_seconds()
-    jaccard_pct  = (overlap_secs / union_secs * 100.0) if union_secs > 0 and overlap_secs > 0 else 0.0
+    union_secs = (union_end - union_start).total_seconds()
+    jaccard_pct = (
+        (overlap_secs / union_secs * 100.0)
+        if union_secs > 0 and overlap_secs > 0
+        else 0.0
+    )
 
-    print(f"  Overlap duration: {timedelta(seconds=overlap_secs)}  ({overlap_secs:.2f} s)")
+    print(
+        f"  Overlap duration: {timedelta(seconds=overlap_secs)}  ({overlap_secs:.2f} s)"
+    )
     print(f"  Jaccard overlap: {jaccard_pct:.1f}%  (overlap / union)")
 
     if jaccard_pct < OVERLAP_MIN_PCT:
-        print(f"WARNING: Files appear to be sequential runs "
-              f"({jaccard_pct:.1f}% Jaccard overlap < {OVERLAP_MIN_PCT:.0f}% threshold).")
+        print(
+            f"WARNING: Files appear to be sequential runs "
+            f"({jaccard_pct:.1f}% Jaccard overlap < {OVERLAP_MIN_PCT:.0f}% threshold)."
+        )
         print("  Skipping consolidation \u2013 per-file results above are still valid.")
         if excel_path is not None:
             write_polarwarp_excel(
-                excel_path, saved_file_dfs, per_client_stats, per_endpoint_stats,
+                excel_path,
+                saved_file_dfs,
+                per_client_stats,
+                per_endpoint_stats,
                 summary_file_data=summary_file_data,
             )
         sys.exit(0)
 
     if jaccard_pct < OVERLAP_MAX_PCT:
-        print(f"WARNING: Partial overlap detected ({jaccard_pct:.1f}% Jaccard).  "
-              f"Filtering all files to overlap window before consolidating.")
+        print(
+            f"WARNING: Partial overlap detected ({jaccard_pct:.1f}% Jaccard).  "
+            f"Filtering all files to overlap window before consolidating."
+        )
     else:
-        print(f"Files are concurrent runs ({jaccard_pct:.1f}% Jaccard).  Consolidating overlap window.")
+        print(
+            f"Files are concurrent runs ({jaccard_pct:.1f}% Jaccard).  Consolidating overlap window."
+        )
 
     # Filter consolidated_df to only operations whose start falls within the overlap window.
     # This ensures counts and throughput are computed over the same time slice across all files.
@@ -1259,47 +1584,73 @@ if __name__ == "__main__":
 
     consolidated_run_time = overlap_end - overlap_start
     consolidated_run_secs = overlap_secs
-    print(f"The consolidated running time in h:mm:ss is {consolidated_run_time}, time in seconds is: {consolidated_run_secs:.2f}")
+    print(
+        f"The consolidated running time in h:mm:ss is {consolidated_run_time}, time in seconds is: {consolidated_run_secs:.2f}"
+    )
 
     # Adjust consolidated_stats to join on both "op" and "bytes_bucket"
     if consolidated_df.is_empty():
         print("No valid data to consolidate.")
         sys.exit(1)
 
-    consolidated_stats = consolidated_df.group_by(["op", "bytes_bucket", "bucket_#"]).agg([
-        (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
-        (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
-        (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
-        (pl.col("duration_ns").quantile(0.95) / 1000).alias("95%_lat_us"),
-        (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
-        (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
-        pl.count("op").alias("tot_count"),
-    ])
-
+    consolidated_stats = consolidated_df.group_by(
+        ["op", "bytes_bucket", "bucket_#"]
+    ).agg(
+        [
+            (pl.col("duration_ns").mean() / 1000).alias("mean_lat_us"),
+            (pl.col("duration_ns").median() / 1000).alias("med._lat_us"),
+            (pl.col("duration_ns").quantile(0.90) / 1000).alias("90%_lat_us"),
+            (pl.col("duration_ns").quantile(0.95) / 1000).alias("95%_lat_us"),
+            (pl.col("duration_ns").quantile(0.99) / 1000).alias("99%_lat_us"),
+            (pl.col("bytes").mean() / 1024).alias("avg_obj_KB"),
+            pl.count("op").alias("tot_count"),
+        ]
+    )
 
     # Combine all throughput metrics into a single DataFrame, grouped by "op" and "bytes_bucket"
     if consolidated_throughputs:
-        combined_throughputs = pl.concat(consolidated_throughputs).group_by(["op", "bytes_bucket"]).agg([
-            pl.col("xput_MBps").sum().alias("total_xput_MBps"),
-            (pl.col("count").sum() / consolidated_run_secs).alias("tot_ops_/_sec"),
-        ])
+        combined_throughputs = (
+            pl.concat(consolidated_throughputs)
+            .group_by(["op", "bytes_bucket"])
+            .agg(
+                [
+                    pl.col("xput_MBps").sum().alias("total_xput_MBps"),
+                    (pl.col("count").sum() / consolidated_run_secs).alias(
+                        "tot_ops_/_sec"
+                    ),
+                ]
+            )
+        )
     else:
-        combined_throughputs = pl.DataFrame({
-            "op": [], "bytes_bucket": [], "total_xput_MBps": [], "tot_ops_/_sec": []
-        })
+        combined_throughputs = pl.DataFrame(
+            {"op": [], "bytes_bucket": [], "total_xput_MBps": [], "tot_ops_/_sec": []}
+        )
 
     # Join consolidated throughput metrics on "op" and "bytes_bucket"
-    consolidated_stats = consolidated_stats.join(combined_throughputs, on=["op", "bytes_bucket"], how="left")
+    consolidated_stats = consolidated_stats.join(
+        combined_throughputs, on=["op", "bytes_bucket"], how="left"
+    )
     consolidated_stats = consolidated_stats.sort(["bucket_#", "op"])
 
     # Ensure all expected columns are present and in the desired order
     desired_column_order = [
-        "op", "bytes_bucket", "bucket_#", "mean_lat_us", "med._lat_us",
-        "90%_lat_us", "95%_lat_us", "99%_lat_us", "avg_obj_KB",
-        "tot_ops_/_sec", "total_xput_MBps", "tot_count",
+        "op",
+        "bytes_bucket",
+        "bucket_#",
+        "mean_lat_us",
+        "med._lat_us",
+        "90%_lat_us",
+        "95%_lat_us",
+        "99%_lat_us",
+        "avg_obj_KB",
+        "tot_ops_/_sec",
+        "total_xput_MBps",
+        "tot_count",
     ]
 
-    consolidated_stats = consolidated_stats.select(desired_column_order).sort(["bucket_#", "op"])
+    consolidated_stats = consolidated_stats.select(desired_column_order).sort(
+        ["bucket_#", "op"]
+    )
 
     # Convert to pandas for final output formatting
     consolidated_stats_pd = consolidated_stats.to_pandas()
@@ -1317,7 +1668,9 @@ if __name__ == "__main__":
     ]
     for column in columns_to_format:
         if column in consolidated_stats_pd:
-            consolidated_stats_pd[column] = consolidated_stats_pd[column].map(format_with_commas)
+            consolidated_stats_pd[column] = consolidated_stats_pd[column].map(
+                format_with_commas
+            )
 
     print("Consolidated Results:")
     print(consolidated_stats_pd)
@@ -1337,7 +1690,11 @@ if __name__ == "__main__":
     # Write Excel for multi-file run
     if excel_path is not None:
         write_polarwarp_excel(
-            excel_path, saved_file_dfs, per_client_stats, per_endpoint_stats,
-            consolidated_df, consolidated_run_secs,
+            excel_path,
+            saved_file_dfs,
+            per_client_stats,
+            per_endpoint_stats,
+            consolidated_df,
+            consolidated_run_secs,
             summary_file_data=summary_file_data,
         )

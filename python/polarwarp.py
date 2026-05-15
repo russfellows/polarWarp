@@ -440,6 +440,114 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
                         drow += 1
                         drow = _write_df(ws, op_ep, startrow=drow)
 
+        def _build_timeseries_pd(sdf):
+            """Build wide-format time-series data from a summary DataFrame.
+
+            Filters TOTAL rows, parses start timestamps, computes seconds-from-start,
+            and pivots so each op type becomes its own ops_per_sec and MBps columns.
+
+            Returns (ts_pd, ops_list):
+              - ts_pd:    pandas DataFrame with columns [seconds, <op>_ops…, <op>_MBps…]
+              - ops_list: sorted list of non-TOTAL op names present in the data
+            """
+            df_filt = sdf.filter(pl.col("op") != "TOTAL")
+            if df_filt.height == 0:
+                return None, []
+
+            # Parse ISO-8601 start strings to UTC datetimes, then compute
+            # seconds-from-first-interval as an integer offset.
+            df_filt = df_filt.with_columns(
+                pl.col("start").str.to_datetime(
+                    strict=False, time_unit="us", time_zone="UTC"
+                ).alias("start_dt")
+            )
+            min_start = df_filt.select(pl.col("start_dt").min()).item()
+            df_filt = df_filt.with_columns([
+                (
+                    (pl.col("start_dt") - min_start).dt.total_microseconds() / 1_000_000.0
+                ).round(0).cast(pl.Int64).alias("seconds"),
+                (pl.col("bps") / 1_048_576.0).alias("MBps"),
+            ])
+
+            ops_list = sorted(df_filt.select(pl.col("op").unique()).to_series().to_list())
+
+            # Pivot ops_per_sec and MBps so each op becomes a column.
+            ops_pivot = df_filt.pivot(
+                on="op", index="seconds", values="ops_per_sec", aggregate_function="mean"
+            )
+            ops_pivot = ops_pivot.rename(
+                {op: f"{op}_ops" for op in ops_list if op in ops_pivot.columns}
+            )
+
+            bw_pivot = df_filt.pivot(
+                on="op", index="seconds", values="MBps", aggregate_function="mean"
+            )
+            bw_pivot = bw_pivot.rename(
+                {op: f"{op}_MBps" for op in ops_list if op in bw_pivot.columns}
+            )
+
+            ts_df = ops_pivot.join(bw_pivot, on="seconds", how="full", coalesce=True).sort("seconds")
+            return ts_df.to_pandas(), ops_list
+
+        def _write_summary_chart_tab(wb, sdf, chart_tab_name):
+            """Write a time-series data tab with ops/sec and throughput line charts.
+
+            Produces two side-by-side line charts below the pivot data table:
+              1. Operations/sec over Time (GET, PUT, META series)
+              2. Throughput MiB/s over Time (GET, PUT only — META has no bandwidth)
+            """
+            ts_pd, ops_list = _build_timeseries_pd(sdf)
+            if ts_pd is None or ts_pd.empty:
+                return
+
+            ws = wb.add_worksheet(chart_tab_name)
+            n_rows = len(ts_pd)
+
+            # Write pivot data (header + rows) starting at row 0
+            _write_df(ws, ts_pd, startrow=0)
+
+            cols = list(ts_pd.columns)  # ['seconds', 'GET_ops', …, 'GET_MBps', …]
+            sec_ci = cols.index('seconds')
+
+            # ── Chart 1: ops/sec over time ──────────────────────────────────────
+            chart_ops = wb.add_chart({'type': 'line'})
+            for op in ops_list:
+                col_name = f"{op}_ops"
+                if col_name in cols:
+                    ci = cols.index(col_name)
+                    chart_ops.add_series({
+                        'name':       op,
+                        'categories': [chart_tab_name, 1, sec_ci, n_rows, sec_ci],
+                        'values':     [chart_tab_name, 1, ci,     n_rows, ci],
+                    })
+            chart_ops.set_title({'name': 'Operations/sec over Time'})
+            chart_ops.set_x_axis({'name': 'Seconds'})
+            chart_ops.set_y_axis({'name': 'ops/sec'})
+            chart_ops.set_legend({'position': 'bottom'})
+
+            # ── Chart 2: throughput (MiB/s) — GET and PUT only ─────────────────
+            chart_bw = wb.add_chart({'type': 'line'})
+            for op in (o for o in ops_list if o in ('GET', 'PUT')):
+                col_name = f"{op}_MBps"
+                if col_name in cols:
+                    ci = cols.index(col_name)
+                    chart_bw.add_series({
+                        'name':       op,
+                        'categories': [chart_tab_name, 1, sec_ci, n_rows, sec_ci],
+                        'values':     [chart_tab_name, 1, ci,     n_rows, ci],
+                    })
+            chart_bw.set_title({'name': 'Throughput (MiB/s) over Time'})
+            chart_bw.set_x_axis({'name': 'Seconds'})
+            chart_bw.set_y_axis({'name': 'MiB/s'})
+            chart_bw.set_legend({'position': 'bottom'})
+
+            # Place both charts below the data, side by side
+            chart_row = n_rows + 3
+            if any(f"{op}_ops" in cols for op in ops_list):
+                ws.insert_chart(chart_row, 0, chart_ops)
+            if any(f"{op}_MBps" in cols for op in ('GET', 'PUT')):
+                ws.insert_chart(chart_row, 8, chart_bw)
+
         # Pre-compute unique short names to avoid worksheet name collisions when
         # multiple files share the same prefix after truncation to 20 characters.
         if single:
@@ -487,6 +595,8 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
             for entry in summary_file_data:
                 sfp, sdf = entry['path'], entry['df']
                 short = _short(sfp)
+
+                # Summary statistics tab (aggregate stats per op)
                 tab_name = _tab(short, 'Summary')
                 ws = wb.add_worksheet(tab_name)
                 stats_pl = _compute_summary_stats_df(sdf)
@@ -494,6 +604,9 @@ def write_polarwarp_excel(excel_path, saved_files, per_client, per_endpoint,
                 # Keep only columns that exist (guard against schema changes)
                 ordered = [c for c in summary_cols if c in stats_pd.columns]
                 _write_df(ws, stats_pd[ordered], startrow=0)
+
+                # Charts tab (time-series line charts)
+                _write_summary_chart_tab(wb, sdf, _tab(short, 'Charts'))
 
         wb.close()
         print(f"\nExcel file written: {excel_path}")

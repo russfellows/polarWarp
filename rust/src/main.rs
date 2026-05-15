@@ -11,7 +11,7 @@ use clap::{Parser, ArgAction};
 use num_format::{Locale, ToFormattedString};
 use polars::prelude::*;
 use regex::Regex;
-use rust_xlsxwriter::{Format, Workbook};
+use rust_xlsxwriter::{Chart, ChartLegendPosition, ChartType, Format, Workbook};
 
 /// Rows for one Excel results tab and one detail tab: (results_rows, detail_rows)
 type ExcelTabRows = (Vec<Vec<String>>, Vec<Vec<String>>);
@@ -279,8 +279,9 @@ fn main() -> Result<()> {
     // Excel: per-file collected rows (main_rows, detail_rows, file_path)
     let mut file_excel_data: Vec<FileExcelEntry> = Vec::new();
 
-    // Summary-file Excel rows collected separately (one entry per file)
-    let mut summary_excel_data: Vec<(Vec<Vec<String>>, String)> = Vec::new();
+    // Summary-file Excel rows collected separately (one entry per file):
+    // (stats_rows, raw_df_for_charts, file_path)
+    let mut summary_excel_data: Vec<(Vec<Vec<String>>, DataFrame, String)> = Vec::new();
     let mut any_summary_file = false;
     let mut any_trace_file = false;
 
@@ -300,7 +301,7 @@ fn main() -> Result<()> {
                 let (df, _, _) = process_summary_file(file_path)?;
                 if excel_path.is_some() {
                     let rows = collect_summary_excel_rows(&df)?;
-                    summary_excel_data.push((rows, file_path.clone()));
+                    summary_excel_data.push((rows, df.clone(), file_path.clone()));
                 }
                 let elapsed = start.elapsed();
                 println!("Processed file in {:.2?}", elapsed);
@@ -491,15 +492,17 @@ fn main() -> Result<()> {
             }
         }
 
-        // Add one tab per summary file
-        for (rows, fp) in &summary_excel_data {
+        // Add one tab per summary file (stats) and collect chart tab data
+        let mut chart_tab_data: Vec<(DataFrame, String)> = Vec::new();
+        for (rows, df, fp) in &summary_excel_data {
             let short = derive_short_name(fp);
             let tab_name = make_tab_name(&short, "Summary");
             tabs.push((tab_name, rows.clone()));
+            chart_tab_data.push((df.clone(), make_tab_name(&short, "Charts")));
         }
 
-        if !tabs.is_empty() {
-            write_excel_workbook(path, &tabs)?;
+        if !tabs.is_empty() || !chart_tab_data.is_empty() {
+            write_excel_workbook_with_chart_tabs(path, &tabs, &chart_tab_data)?;
             println!("\nExcel file written: {}", path);
         }
     }
@@ -1704,15 +1707,20 @@ fn make_tab_name(base: &str, suffix: &str) -> String {
     }
 }
 
-/// Write an Excel workbook where each `(tab_name, rows)` element becomes one worksheet.
-/// The first row of each `rows` slice is treated as the header (bold).
-/// Numeric cell values are stored as numbers; others as strings.
-fn write_excel_workbook(path: &str, tabs: &[(String, Vec<Vec<String>>)]) -> Result<()> {
+/// Write an Excel workbook that includes both regular string-based tabs and
+/// time-series chart tabs for summary files.  Replaces a bare
+/// `write_excel_workbook` call when there are summary files to chart.
+fn write_excel_workbook_with_chart_tabs(
+    path: &str,
+    tabs: &[(String, Vec<Vec<String>>)],
+    chart_tabs: &[(DataFrame, String)],
+) -> Result<()> {
     let mut workbook = Workbook::new();
-    let header_fmt = Format::new().set_bold().set_font_name("Aptos");
-    let data_fmt   = Format::new().set_font_name("Aptos");
+    let header_fmt  = Format::new().set_bold().set_font_name("Aptos");
+    let data_fmt    = Format::new().set_font_name("Aptos");
     let section_fmt = Format::new().set_bold().set_font_name("Aptos").set_font_size(11.0);
 
+    // Write regular (string-based) tabs — identical to write_excel_workbook
     for (tab_name, rows) in tabs {
         if rows.is_empty() {
             continue;
@@ -1721,7 +1729,6 @@ fn write_excel_workbook(path: &str, tabs: &[(String, Vec<Vec<String>>)]) -> Resu
         ws.set_name(tab_name)?;
 
         for (row_idx, row) in rows.iter().enumerate() {
-            // A row with one cell that starts with "===" or "---" is a section header
             let is_section = row.len() == 1 &&
                 (row[0].starts_with("===") || row[0].starts_with("---"));
 
@@ -1739,7 +1746,6 @@ fn write_excel_workbook(path: &str, tabs: &[(String, Vec<Vec<String>>)]) -> Resu
             }
         }
 
-        // Set column widths based on max content length in each column
         if let Some(header) = rows.first() {
             for col_idx in 0..header.len() {
                 let max_len = rows.iter()
@@ -1751,7 +1757,151 @@ fn write_excel_workbook(path: &str, tabs: &[(String, Vec<Vec<String>>)]) -> Resu
         }
     }
 
+    // Write time-series chart tabs for summary files
+    for (df, tab_name) in chart_tabs {
+        write_summary_chart_tab(&mut workbook, df, tab_name)?;
+    }
+
     workbook.save(path).with_context(|| format!("Failed to save Excel file: {}", path))?;
+    Ok(())
+}
+
+/// Write a worksheet with per-second time-series data and two embedded line charts:
+///   1. Operations/sec over Time (one series per non-TOTAL op)
+///   2. Throughput MiB/s over Time (GET and PUT only — META has no byte payload)
+///
+/// Column layout: [seconds | <op>_ops … | <op>_MBps …]
+/// Charts are inserted below the data table, side by side.
+fn write_summary_chart_tab(
+    workbook: &mut Workbook,
+    df: &DataFrame,
+    tab_name: &str,
+) -> Result<()> {
+    // Filter TOTAL rows; sort by time then op for deterministic ordering
+    let df_filt = df.clone().lazy()
+        .filter(col("op").neq(lit("TOTAL")))
+        .sort(["start_ns", "op"], SortMultipleOptions::default())
+        .collect()?;
+
+    if df_filt.height() == 0 {
+        return Ok(());
+    }
+
+    let op_col    = df_filt.column("op")?.str()?;
+    let start_col = df_filt.column("start_ns")?.i64()?;
+    let bps_col   = df_filt.column("bps")?.f64()?;
+    let ops_col   = df_filt.column("ops_per_sec")?.f64()?;
+
+    let min_ns = start_col.min().unwrap_or(0);
+
+    // Collect unique ops (sorted) and unique second offsets (sorted)
+    let mut ops_set:  std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut secs_set: std::collections::HashSet<i64>    = std::collections::HashSet::new();
+    for i in 0..df_filt.height() {
+        ops_set.insert(op_col.get(i).unwrap_or("").to_string());
+        secs_set.insert((start_col.get(i).unwrap_or(0) - min_ns) / 1_000_000_000);
+    }
+    let mut all_ops:  Vec<String> = ops_set.into_iter().collect();
+    all_ops.sort();
+    let mut all_secs: Vec<i64> = secs_set.into_iter().collect();
+    all_secs.sort();
+
+    let n_rows = all_secs.len();
+    let n_ops  = all_ops.len();
+
+    // Build per-(op, seconds) lookup → (ops_per_sec, MBps)
+    let mut lookup: std::collections::HashMap<(String, i64), (f64, f64)> =
+        std::collections::HashMap::new();
+    for i in 0..df_filt.height() {
+        let op   = op_col.get(i).unwrap_or("").to_string();
+        let secs = (start_col.get(i).unwrap_or(0) - min_ns) / 1_000_000_000;
+        let ops  = ops_col.get(i).unwrap_or(0.0);
+        let mbps = bps_col.get(i).unwrap_or(0.0) / 1_048_576.0;
+        lookup.insert((op, secs), (ops, mbps));
+    }
+
+    // ops for throughput chart: GET and PUT only (META has no byte payload)
+    let bw_ops: Vec<&String> = all_ops.iter()
+        .filter(|o| o.as_str() == "GET" || o.as_str() == "PUT")
+        .collect();
+
+    // ── Write worksheet ───────────────────────────────────────────────────────
+    let ws = workbook.add_worksheet();
+    ws.set_name(tab_name)?;
+
+    let header_fmt = Format::new().set_bold().set_font_name("Aptos");
+    let data_fmt   = Format::new().set_font_name("Aptos");
+
+    // Header row: seconds | <op>_ops … | <op>_MBps …
+    ws.write_string_with_format(0, 0, "seconds", &header_fmt)?;
+    for (oi, op) in all_ops.iter().enumerate() {
+        ws.write_string_with_format(0, (oi + 1) as u16, &format!("{}_ops", op), &header_fmt)?;
+    }
+    for (bi, op) in bw_ops.iter().enumerate() {
+        ws.write_string_with_format(0, (n_ops + 1 + bi) as u16, &format!("{}_MBps", op), &header_fmt)?;
+    }
+
+    // Data rows
+    for (ri, &secs) in all_secs.iter().enumerate() {
+        let row = (ri + 1) as u32;
+        ws.write_number_with_format(row, 0, secs as f64, &data_fmt)?;
+        for (oi, op) in all_ops.iter().enumerate() {
+            if let Some(&(ops, _)) = lookup.get(&(op.clone(), secs)) {
+                ws.write_number_with_format(row, (oi + 1) as u16, ops, &data_fmt)?;
+            }
+        }
+        for (bi, op) in bw_ops.iter().enumerate() {
+            if let Some(&(_, mbps)) = lookup.get(&((*op).clone(), secs)) {
+                ws.write_number_with_format(row, (n_ops + 1 + bi) as u16, mbps, &data_fmt)?;
+            }
+        }
+    }
+
+    // Set column widths
+    let n_cols = 1 + n_ops + bw_ops.len();
+    for ci in 0..n_cols {
+        ws.set_column_width(ci as u16, 13.0)?;
+    }
+
+    // ── Charts ────────────────────────────────────────────────────────────────
+    let chart_row = (n_rows + 3) as u32;
+
+    // Chart 1: ops/sec over time
+    if n_ops > 0 {
+        let mut chart_ops = Chart::new(ChartType::Line);
+        chart_ops.title().set_name("Operations/sec over Time");
+        chart_ops.x_axis().set_name("Seconds");
+        chart_ops.y_axis().set_name("ops/sec");
+        chart_ops.legend().set_position(ChartLegendPosition::Bottom);
+
+        for (oi, op) in all_ops.iter().enumerate() {
+            let data_col = (oi + 1) as u16;
+            chart_ops.add_series()
+                .set_name(op.as_str())
+                .set_categories((tab_name, 1, 0, n_rows as u32, 0))
+                .set_values((tab_name, 1, data_col, n_rows as u32, data_col));
+        }
+        ws.insert_chart(chart_row, 0, &chart_ops)?;
+    }
+
+    // Chart 2: throughput (MiB/s) — GET and PUT only
+    if !bw_ops.is_empty() {
+        let mut chart_bw = Chart::new(ChartType::Line);
+        chart_bw.title().set_name("Throughput (MiB/s) over Time");
+        chart_bw.x_axis().set_name("Seconds");
+        chart_bw.y_axis().set_name("MiB/s");
+        chart_bw.legend().set_position(ChartLegendPosition::Bottom);
+
+        for (bi, op) in bw_ops.iter().enumerate() {
+            let data_col = (n_ops + 1 + bi) as u16;
+            chart_bw.add_series()
+                .set_name(op.as_str())
+                .set_categories((tab_name, 1, 0, n_rows as u32, 0))
+                .set_values((tab_name, 1, data_col, n_rows as u32, data_col));
+        }
+        ws.insert_chart(chart_row, 8, &chart_bw)?;
+    }
+
     Ok(())
 }
 

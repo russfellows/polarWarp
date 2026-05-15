@@ -234,8 +234,9 @@ With `--excel`, summary files produce two dedicated tabs in the workbook:
 
 ## Related Projects
 
+- **[warp-replay](https://github.com/russfellows/warp-replay)** - Recommended S3 benchmarking and replay tool; the primary companion tool for PolarWarp. Produces the oplog trace and summary formats that PolarWarp is designed to analyze.
 - **[sai3-bench](https://github.com/russfellows/sai3-bench)** - Multi-protocol I/O benchmarking suite
-- **[MinIO Warp](https://github.com/minio/warp)** - S3 benchmarking tool
+- **[MinIO Warp](https://github.com/minio/warp)** - The upstream S3 benchmarking tool. Has some compatibility with PolarWarp's trace format, but is limited by several bugs and inconsistent output formatting; warp-replay is strongly preferred.
 
 ## Changelog
 

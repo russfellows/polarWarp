@@ -118,3 +118,10 @@ uv run --group dev pytest tests/test_polarwarp.py -q
 
 The `pytest` and `zstandard` packages are declared as dev-only dependencies in `pyproject.toml`
 under `[dependency-groups] dev` — they are not installed when users install polarwarp normally.
+
+## Related Projects
+
+- **[warp-replay](https://github.com/russfellows/warp-replay)** - Recommended S3 benchmarking and replay tool; the primary companion tool for PolarWarp. Produces the oplog trace and summary formats that PolarWarp is designed to analyze.
+- **[sai3-bench](https://github.com/russfellows/sai3-bench)** - Multi-protocol I/O benchmarking suite
+- **[MinIO Warp](https://github.com/minio/warp)** - The upstream S3 benchmarking tool. Has some compatibility with PolarWarp's trace format, but is limited by several bugs and inconsistent output formatting; warp-replay is strongly preferred.
+- **[polarwarp-rs](https://github.com/russfellows/polarWarp/tree/main/rust)** - Rust implementation of PolarWarp

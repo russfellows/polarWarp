@@ -662,12 +662,12 @@ def write_polarwarp_excel(
             chart_ops.set_y_axis({"name": ops_unit})
             chart_ops.set_legend({"position": "bottom"})
 
-            # Place both charts below the data, side by side
-            chart_row = n_rows + 3
+            # Place both charts to the right of the data, starting at row 1
+            n_data_cols = len(ts_pd.columns)
             if any(f"{op}_{bw_col_suffix}" in cols for op in ops_list):
-                ws.insert_chart(chart_row, 0, chart_bw)
+                ws.insert_chart(1, n_data_cols + 1, chart_bw)
             if any(f"{op}_{ops_col_suffix}" in cols for op in ops_list):
-                ws.insert_chart(chart_row, 8, chart_ops)
+                ws.insert_chart(1, n_data_cols + 9, chart_ops)
 
         # Pre-compute unique short names to avoid worksheet name collisions when
         # multiple files share the same prefix after truncation to 20 characters.

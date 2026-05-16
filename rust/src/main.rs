@@ -2196,8 +2196,7 @@ fn write_summary_chart_tab(workbook: &mut Workbook, df: &DataFrame, tab_name: &s
         series_info.push((op.clone(), t_col, g_col, o_col, data.len() as u32));
     }
 
-    let max_rows = series_info.iter().map(|s| s.4).max().unwrap_or(0);
-    let chart_row = max_rows + 3;
+    let data_cols = (op_names.len() * 3) as u16;
 
     let mut marker = ChartMarker::new();
     marker.set_size(4);
@@ -2219,7 +2218,7 @@ fn write_summary_chart_tab(workbook: &mut Workbook, df: &DataFrame, tab_name: &s
             .set_values((tab_name, 1, *g_col, *n_rows, *g_col))
             .set_marker(&marker);
     }
-    ws.insert_chart(chart_row, 0, &chart_bw)?;
+    ws.insert_chart(1, data_cols + 1, &chart_bw)?;
 
     let ops_chart_title = format!("I/O Rate ({}) over Time", ops_unit);
     let ops_y_label = ops_unit.to_string();
@@ -2238,7 +2237,7 @@ fn write_summary_chart_tab(workbook: &mut Workbook, df: &DataFrame, tab_name: &s
             .set_values((tab_name, 1, *o_col, *n_rows, *o_col))
             .set_marker(&marker);
     }
-    ws.insert_chart(chart_row, 8, &chart_ops)?;
+    ws.insert_chart(1, data_cols + 9, &chart_ops)?;
 
     Ok(())
 }

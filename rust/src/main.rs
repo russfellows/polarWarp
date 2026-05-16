@@ -11,7 +11,7 @@ use clap::{ArgAction, Parser};
 use num_format::{Locale, ToFormattedString};
 use polars::prelude::*;
 use regex::Regex;
-use rust_xlsxwriter::{Chart, ChartLegendPosition, ChartType, Format, Workbook};
+use rust_xlsxwriter::{Chart, ChartLegendPosition, ChartMarker, ChartType, Format, Workbook};
 
 /// Rows for one Excel results tab and one detail tab: (results_rows, detail_rows)
 type ExcelTabRows = (Vec<Vec<String>>, Vec<Vec<String>>);
@@ -1907,94 +1907,72 @@ fn compute_and_display_summary_stats(df: &DataFrame) -> Result<()> {
     Ok(())
 }
 
-/// Collect summary stats rows for Excel export (header + data rows, no commas in numbers).
+/// Convert nanoseconds since Unix epoch to a UTC timestamp string (YYYY-MM-DDTHH:MM:SSZ).
+/// Uses the civil_from_days algorithm (Howard Hinnant) — no external crates required.
+fn ns_to_rfc3339(ns: i64) -> String {
+    let s = (ns.max(0) / 1_000_000_000) as u64;
+    let h = (s % 86400) / 3600;
+    let min = (s % 3600) / 60;
+    let sec = s % 60;
+    let days = s / 86400;
+    // civil_from_days: http://howardhinnant.github.io/date_algorithms.html
+    let z = days as i64 + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, mo, d, h, min, sec
+    )
+}
+
+/// Collect raw per-second summary rows for Excel export.
+/// Returns every row from the file (header + data), sorted chronologically.
+/// Columns: op | start | end | GBps | ops_per_sec | errors
 fn collect_summary_excel_rows(df: &DataFrame) -> Result<Vec<Vec<String>>> {
-    let stats = df
+    let df_sorted = df
         .clone()
         .lazy()
-        .group_by([col("op")])
-        .agg([
-            col("bps").count().alias("segments"),
-            (col("bps").mean() / lit(1_048_576.0)).alias("mean_MBps"),
-            (col("bps").median() / lit(1_048_576.0)).alias("p50_MBps"),
-            (col("bps").quantile(lit(0.90), QuantileMethod::Linear) / lit(1_048_576.0))
-                .alias("p90_MBps"),
-            (col("bps").quantile(lit(0.99), QuantileMethod::Linear) / lit(1_048_576.0))
-                .alias("p99_MBps"),
-            (col("bps").min() / lit(1_048_576.0)).alias("min_MBps"),
-            (col("bps").max() / lit(1_048_576.0)).alias("max_MBps"),
-            (col("bps").std(1) / lit(1_048_576.0)).alias("stdev_MBps"),
-            col("ops_per_sec").mean().alias("mean_ops"),
-            col("ops_per_sec").median().alias("p50_ops"),
-            col("ops_per_sec")
-                .quantile(lit(0.99), QuantileMethod::Linear)
-                .alias("p99_ops"),
-            col("errors")
-                .cast(DataType::Int64)
-                .sum()
-                .alias("total_errors"),
-        ])
-        .sort(["op"], SortMultipleOptions::default())
+        .sort(["start_ns", "op"], SortMultipleOptions::default())
         .collect()?;
 
     let mut rows: Vec<Vec<String>> = vec![vec![
         "op".into(),
-        "segments".into(),
-        "mean_MBps".into(),
-        "p50_MBps".into(),
-        "p90_MBps".into(),
-        "p99_MBps".into(),
-        "min_MBps".into(),
-        "max_MBps".into(),
-        "stdev_MBps".into(),
-        "mean_ops/s".into(),
-        "p50_ops/s".into(),
-        "p99_ops/s".into(),
-        "total_errors".into(),
+        "start".into(),
+        "end".into(),
+        "GBps".into(),
+        "ops_per_sec".into(),
+        "errors".into(),
     ]];
 
-    let op_col = stats.column("op")?.str()?;
-    let segs_col = stats.column("segments")?.u32()?;
-    let mean_col = stats.column("mean_MBps")?.f64()?;
-    let p50_col = stats.column("p50_MBps")?.f64()?;
-    let p90_col = stats.column("p90_MBps")?.f64()?;
-    let p99_col = stats.column("p99_MBps")?.f64()?;
-    let min_col = stats.column("min_MBps")?.f64()?;
-    let max_col = stats.column("max_MBps")?.f64()?;
-    let stdev_col = stats.column("stdev_MBps")?.f64()?;
-    let mops_col = stats.column("mean_ops")?.f64()?;
-    let p50ops_col = stats.column("p50_ops")?.f64()?;
-    let p99ops_col = stats.column("p99_ops")?.f64()?;
-    let errs_col = stats.column("total_errors")?.i64()?;
+    let op_col = df_sorted.column("op")?.str()?;
+    let start_col = df_sorted.column("start_ns")?.i64()?;
+    let end_col = df_sorted.column("end_ns")?.i64()?;
+    let bps_col = df_sorted.column("bps")?.f64()?;
+    let ops_col = df_sorted.column("ops_per_sec")?.f64()?;
+    let errs_col = df_sorted.column("errors")?.i64()?;
 
-    // Non-TOTAL rows first, then TOTAL
-    let height = stats.height();
-    let push_row = |rows: &mut Vec<Vec<String>>, i: usize| {
+    for i in 0..df_sorted.height() {
+        let op = op_col.get(i).unwrap_or("").to_string();
+        let start_ns = start_col.get(i).unwrap_or(0);
+        let end_ns = end_col.get(i).unwrap_or(0);
+        let bps = bps_col.get(i).unwrap_or(0.0);
+        let ops = ops_col.get(i).unwrap_or(0.0);
+        let errors = errs_col.get(i).unwrap_or(0);
         rows.push(vec![
-            op_col.get(i).unwrap_or("?").to_string(),
-            segs_col.get(i).unwrap_or(0).to_string(),
-            format!("{:.2}", mean_col.get(i).unwrap_or(0.0)),
-            format!("{:.2}", p50_col.get(i).unwrap_or(0.0)),
-            format!("{:.2}", p90_col.get(i).unwrap_or(0.0)),
-            format!("{:.2}", p99_col.get(i).unwrap_or(0.0)),
-            format!("{:.2}", min_col.get(i).unwrap_or(0.0)),
-            format!("{:.2}", max_col.get(i).unwrap_or(0.0)),
-            format!("{:.2}", stdev_col.get(i).unwrap_or(0.0)),
-            format!("{:.2}", mops_col.get(i).unwrap_or(0.0)),
-            format!("{:.2}", p50ops_col.get(i).unwrap_or(0.0)),
-            format!("{:.2}", p99ops_col.get(i).unwrap_or(0.0)),
-            errs_col.get(i).unwrap_or(0).to_string(),
+            op,
+            ns_to_rfc3339(start_ns),
+            ns_to_rfc3339(end_ns),
+            format!("{:.3}", bps / 1_000_000_000.0),
+            format!("{:.3}", ops),
+            errors.to_string(),
         ]);
-    };
-    for i in 0..height {
-        if op_col.get(i).unwrap_or("") != "TOTAL" {
-            push_row(&mut rows, i);
-        }
-    }
-    for i in 0..height {
-        if op_col.get(i).unwrap_or("") == "TOTAL" {
-            push_row(&mut rows, i);
-        }
     }
 
     Ok(rows)
@@ -2126,63 +2104,66 @@ fn write_excel_workbook_with_chart_tabs(
     Ok(())
 }
 
-/// Write a worksheet with per-second time-series data and two embedded line charts:
-///   1. Operations/sec over Time (one series per non-TOTAL op)
-///   2. Throughput MiB/s over Time (GET and PUT only — META has no byte payload)
-///
-/// Column layout: [seconds | <op>_ops … | <op>_MBps …]
-/// Charts are inserted below the data table, side by side.
+/// Write a worksheet with raw time-series data and two embedded XY scatter charts.
+/// TOTAL rows are excluded; only per-op rows (GET, PUT, …) are plotted.
+/// Column layout: [{op}_time_s | {op}_GBps | {op}_ops_s] repeated for each op.
+/// Chart 1 (left):  Throughput (GB/s) vs Elapsed Time — one series per op.
+/// Chart 2 (right): I/O Rate (ops/sec) vs Elapsed Time — one series per op.
 fn write_summary_chart_tab(workbook: &mut Workbook, df: &DataFrame, tab_name: &str) -> Result<()> {
-    // Filter TOTAL rows; sort by time then op for deterministic ordering
-    let df_filt = df
+    // Compute global min_ns from the full dataset (consistent X axis origin)
+    let min_ns = df.column("start_ns")?.i64()?.min().unwrap_or(0);
+
+    // Exclude TOTAL and zero-throughput rows (warmup/cooldown)
+    let df_chart = df
         .clone()
         .lazy()
-        .filter(col("op").neq(lit("TOTAL")))
-        .sort(["start_ns", "op"], SortMultipleOptions::default())
+        .filter(col("op").neq(lit("TOTAL")).and(col("bps").gt(lit(0.0))))
+        .sort(["op", "start_ns"], SortMultipleOptions::default())
         .collect()?;
 
-    if df_filt.height() == 0 {
+    if df_chart.height() == 0 {
         return Ok(());
     }
 
-    let op_col = df_filt.column("op")?.str()?;
-    let start_col = df_filt.column("start_ns")?.i64()?;
-    let bps_col = df_filt.column("bps")?.f64()?;
-    let ops_col = df_filt.column("ops_per_sec")?.f64()?;
+    // Auto-scale throughput unit based on peak bps in this dataset
+    let max_bps = df_chart.column("bps")?.f64()?.max().unwrap_or(0.0);
+    let (bw_divisor, bw_unit, bw_col_suffix) = if max_bps >= 1_000_000_000.0 {
+        (1_000_000_000.0_f64, "GB/s", "GBps")
+    } else {
+        (1_000_000.0_f64, "MB/s", "MBps")
+    };
 
-    let min_ns = start_col.min().unwrap_or(0);
+    // Auto-scale ops unit based on peak ops/sec in this dataset
+    let max_ops = df_chart.column("ops_per_sec")?.f64()?.max().unwrap_or(0.0);
+    let (ops_divisor, ops_unit, ops_col_suffix) = if max_ops >= 1_000.0 {
+        (1_000.0_f64, "Kops/s", "Kops_s")
+    } else {
+        (1.0_f64, "ops/s", "ops_s")
+    };
 
-    // Collect unique ops (sorted) and unique second offsets (sorted)
-    let mut ops_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut secs_set: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    for i in 0..df_filt.height() {
-        ops_set.insert(op_col.get(i).unwrap_or("").to_string());
-        secs_set.insert((start_col.get(i).unwrap_or(0) - min_ns) / 1_000_000_000);
-    }
-    let mut all_ops: Vec<String> = ops_set.into_iter().collect();
-    all_ops.sort();
-    let mut all_secs: Vec<i64> = secs_set.into_iter().collect();
-    all_secs.sort();
+    let op_col = df_chart.column("op")?.str()?;
+    let start_col = df_chart.column("start_ns")?.i64()?;
+    let bps_col = df_chart.column("bps")?.f64()?;
+    let ops_col = df_chart.column("ops_per_sec")?.f64()?;
 
-    let n_rows = all_secs.len();
-    let n_ops = all_ops.len();
-
-    // Build per-(op, seconds) lookup → (ops_per_sec, MBps)
-    let mut lookup: std::collections::HashMap<(String, i64), (f64, f64)> =
+    // Collect per-op data: op → Vec<(elapsed_s, GBps, ops_s)>
+    let mut op_names: Vec<String> = Vec::new();
+    let mut op_data: std::collections::HashMap<String, Vec<(f64, f64, f64)>> =
         std::collections::HashMap::new();
-    for i in 0..df_filt.height() {
+    for i in 0..df_chart.height() {
         let op = op_col.get(i).unwrap_or("").to_string();
-        let secs = (start_col.get(i).unwrap_or(0) - min_ns) / 1_000_000_000;
-        let ops = ops_col.get(i).unwrap_or(0.0);
-        let mbps = bps_col.get(i).unwrap_or(0.0) / 1_048_576.0;
-        lookup.insert((op, secs), (ops, mbps));
+        let elapsed_s = (start_col.get(i).unwrap_or(0) - min_ns) as f64 / 1_000_000_000.0;
+        let bw = bps_col.get(i).unwrap_or(0.0) / bw_divisor;
+        let ops = ops_col.get(i).unwrap_or(0.0) / ops_divisor;
+        op_data
+            .entry(op.clone())
+            .or_default()
+            .push((elapsed_s, bw, ops));
+        if !op_names.contains(&op) {
+            op_names.push(op);
+        }
     }
-
-    // ops for throughput chart: GET and PUT only (META has no byte payload)
-    let bw_ops: Vec<&String> = all_ops
-        .iter()
-        .filter(|o| o.as_str() == "GET" || o.as_str() == "PUT")
-        .collect();
+    op_names.sort(); // alphabetical (TOTAL already excluded)
 
     // ── Write worksheet ───────────────────────────────────────────────────────
     let ws = workbook.add_worksheet();
@@ -2191,82 +2172,72 @@ fn write_summary_chart_tab(workbook: &mut Workbook, df: &DataFrame, tab_name: &s
     let header_fmt = Format::new().set_bold().set_font_name("Aptos");
     let data_fmt = Format::new().set_font_name("Aptos");
 
-    // Header row: seconds | <op>_ops … | <op>_MBps …
-    ws.write_string_with_format(0, 0, "seconds", &header_fmt)?;
-    for (oi, op) in all_ops.iter().enumerate() {
-        ws.write_string_with_format(0, (oi + 1) as u16, format!("{}_ops", op), &header_fmt)?;
-    }
-    for (bi, op) in bw_ops.iter().enumerate() {
-        ws.write_string_with_format(
-            0,
-            (n_ops + 1 + bi) as u16,
-            format!("{}_MBps", op),
-            &header_fmt,
-        )?;
-    }
+    // (op, t_col, gbps_col, ops_col, n_rows)
+    let mut series_info: Vec<(String, u16, u16, u16, u32)> = Vec::new();
 
-    // Data rows
-    for (ri, &secs) in all_secs.iter().enumerate() {
-        let row = (ri + 1) as u32;
-        ws.write_number_with_format(row, 0, secs as f64, &data_fmt)?;
-        for (oi, op) in all_ops.iter().enumerate() {
-            if let Some(&(ops, _)) = lookup.get(&(op.clone(), secs)) {
-                ws.write_number_with_format(row, (oi + 1) as u16, ops, &data_fmt)?;
-            }
+    for (oi, op) in op_names.iter().enumerate() {
+        let t_col = (oi * 3) as u16;
+        let g_col = t_col + 1;
+        let o_col = t_col + 2;
+        ws.write_string_with_format(0, t_col, format!("{}_time_s", op), &header_fmt)?;
+        ws.write_string_with_format(0, g_col, format!("{}_{}", op, bw_col_suffix), &header_fmt)?;
+        ws.write_string_with_format(0, o_col, format!("{}_{}", op, ops_col_suffix), &header_fmt)?;
+
+        let data = op_data.get(op).map(|v| v.as_slice()).unwrap_or(&[]);
+        for (ri, &(t, g, o)) in data.iter().enumerate() {
+            let row = (ri + 1) as u32;
+            ws.write_number_with_format(row, t_col, t, &data_fmt)?;
+            ws.write_number_with_format(row, g_col, g, &data_fmt)?;
+            ws.write_number_with_format(row, o_col, o, &data_fmt)?;
         }
-        for (bi, op) in bw_ops.iter().enumerate() {
-            if let Some(&(_, mbps)) = lookup.get(&((*op).clone(), secs)) {
-                ws.write_number_with_format(row, (n_ops + 1 + bi) as u16, mbps, &data_fmt)?;
-            }
-        }
+        ws.set_column_width(t_col, 12.0)?;
+        ws.set_column_width(g_col, 12.0)?;
+        ws.set_column_width(o_col, 12.0)?;
+        series_info.push((op.clone(), t_col, g_col, o_col, data.len() as u32));
     }
 
-    // Set column widths
-    let n_cols = 1 + n_ops + bw_ops.len();
-    for ci in 0..n_cols {
-        ws.set_column_width(ci as u16, 13.0)?;
+    let data_cols = (op_names.len() * 3) as u16;
+
+    let mut marker = ChartMarker::new();
+    marker.set_size(4);
+
+    let bw_chart_title = format!("Throughput ({}) over Time", bw_unit);
+    let bw_y_label = format!("Throughput ({})", bw_unit);
+
+    // ── Chart 1: Throughput (…) ───────────────────────────────────────────────
+    let mut chart_bw = Chart::new(ChartType::ScatterStraightWithMarkers);
+    chart_bw.title().set_name(&bw_chart_title);
+    chart_bw.x_axis().set_name("Elapsed Time (s)");
+    chart_bw.y_axis().set_name(&bw_y_label);
+    chart_bw.legend().set_position(ChartLegendPosition::Bottom);
+    for (op, t_col, g_col, _, n_rows) in &series_info {
+        chart_bw
+            .add_series()
+            .set_name(op.as_str())
+            .set_categories((tab_name, 1, *t_col, *n_rows, *t_col))
+            .set_values((tab_name, 1, *g_col, *n_rows, *g_col))
+            .set_marker(&marker);
     }
+    ws.insert_chart(1, data_cols + 1, &chart_bw)?;
 
-    // ── Charts ────────────────────────────────────────────────────────────────
-    let chart_row = (n_rows + 3) as u32;
+    let ops_chart_title = format!("I/O Rate ({}) over Time", ops_unit);
+    let ops_y_label = ops_unit.to_string();
 
-    // Chart 1: ops/sec over time
-    if n_ops > 0 {
-        let mut chart_ops = Chart::new(ChartType::Line);
-        chart_ops.title().set_name("Operations/sec over Time");
-        chart_ops.x_axis().set_name("Seconds");
-        chart_ops.y_axis().set_name("ops/sec");
-        chart_ops.legend().set_position(ChartLegendPosition::Bottom);
-
-        for (oi, op) in all_ops.iter().enumerate() {
-            let data_col = (oi + 1) as u16;
-            chart_ops
-                .add_series()
-                .set_name(op.as_str())
-                .set_categories((tab_name, 1, 0, n_rows as u32, 0))
-                .set_values((tab_name, 1, data_col, n_rows as u32, data_col));
-        }
-        ws.insert_chart(chart_row, 0, &chart_ops)?;
+    // ── Chart 2: I/O Rate (…) ───────────────────────────────────────────
+    let mut chart_ops = Chart::new(ChartType::ScatterStraightWithMarkers);
+    chart_ops.title().set_name(&ops_chart_title);
+    chart_ops.x_axis().set_name("Elapsed Time (s)");
+    chart_ops.y_axis().set_name(&ops_y_label);
+    chart_ops.legend().set_position(ChartLegendPosition::Bottom);
+    for (op, t_col, _, o_col, n_rows) in &series_info {
+        chart_ops
+            .add_series()
+            .set_name(op.as_str())
+            .set_categories((tab_name, 1, *t_col, *n_rows, *t_col))
+            .set_values((tab_name, 1, *o_col, *n_rows, *o_col))
+            .set_marker(&marker);
     }
-
-    // Chart 2: throughput (MiB/s) — GET and PUT only
-    if !bw_ops.is_empty() {
-        let mut chart_bw = Chart::new(ChartType::Line);
-        chart_bw.title().set_name("Throughput (MiB/s) over Time");
-        chart_bw.x_axis().set_name("Seconds");
-        chart_bw.y_axis().set_name("MiB/s");
-        chart_bw.legend().set_position(ChartLegendPosition::Bottom);
-
-        for (bi, op) in bw_ops.iter().enumerate() {
-            let data_col = (n_ops + 1 + bi) as u16;
-            chart_bw
-                .add_series()
-                .set_name(op.as_str())
-                .set_categories((tab_name, 1, 0, n_rows as u32, 0))
-                .set_values((tab_name, 1, data_col, n_rows as u32, data_col));
-        }
-        ws.insert_chart(chart_row, 8, &chart_bw)?;
-    }
+    ws.insert_chart(1, data_cols + 9, &chart_ops)?;
 
     Ok(())
 }

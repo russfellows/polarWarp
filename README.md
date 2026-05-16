@@ -1,6 +1,6 @@
 # PolarWarp
 
-[![Version](https://img.shields.io/badge/version-0.2.0-brightgreen.svg)](https://github.com/russfellows/polarWarp/releases)
+[![Version](https://img.shields.io/badge/version-0.2.1-brightgreen.svg)](https://github.com/russfellows/polarWarp/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](python/)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](rust/)
@@ -228,9 +228,24 @@ For summary files, PolarWarp reports throughput variability statistics across se
    TOTAL    120   2,048.00   2,032.15   2,350.40   2,478.20   1,800.00   2,520.00        N/A     512.00     508.04     619.55             0
 ```
 
-With `--excel`, summary files produce two dedicated tabs in the workbook:
-- **`{name}-Summary`** — aggregate throughput statistics (mean, p50, p90, p99, min, max, stdev) per op type
-- **`{name}-Charts`** — per-second time-series data with two embedded line charts: ops/sec over time (all op types) and throughput MiB/s over time (GET + PUT)
+With `--excel`, there are three usage modes:
+
+```bash
+# Trace file only → Results + Detail tabs (latency, throughput, op counts)
+polarwarp-rs --excel=report.xlsx run.trace.tsv.zst
+
+# Summary file only → Summary + Charts tabs
+polarwarp-rs --excel=report.xlsx run.summary.tsv.zst
+
+# Both together → all four tabs in one workbook (recommended)
+polarwarp-rs --excel=report.xlsx run.trace.tsv.zst run.summary.tsv.zst
+```
+
+The trace and summary files for a given warp run share the same base filename, so passing both is straightforward.
+
+Summary file Excel tabs:
+- **`{name}-Summary`** — raw per-second rows from the file: op, start timestamp, end timestamp, GBps, ops/sec, errors
+- **`{name}-Charts`** — two XY scatter charts (Throughput GB/s and I/O Rate ops/sec vs elapsed time), one series per op type (GET, PUT, etc.; TOTAL excluded)
 
 ## Related Projects
 

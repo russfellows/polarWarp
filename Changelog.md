@@ -6,6 +6,47 @@ Both implementations (Rust `polarwarp-rs` and Python `polars-warp`) track the sa
 
 ---
 
+## [0.2.1] - 2026-05-16
+
+### Changed
+
+- **XY scatter charts** (Rust and Python) — The `{name}-Charts` Excel tab now uses XY scatter
+  charts with straight lines and markers instead of plain line charts. Markers are sized at 4pt
+  (roughly half the Excel default) so they sit just above the connecting line without dominating.
+
+- **Auto-scaling throughput unit** (Rust and Python) — The throughput chart Y-axis and column
+  headers now auto-select the unit based on peak bandwidth in the dataset:
+
+  | Peak `bps` | Unit shown | Divisor |
+  |-----------|-----------|---------|
+  | ≥ 1 GB/s | GB/s | ÷ 1 000 000 000 |
+  | < 1 GB/s | MB/s | ÷ 1 000 000 |
+
+- **Auto-scaling ops/sec unit** (Rust and Python) — The I/O rate chart Y-axis and column
+  headers similarly auto-select between `Kops/s` (≥ 1 000 ops/s) and `ops/s` (< 1 000 ops/s).
+
+- **Raw per-second rows in Summary tab** (Rust and Python) — The `{name}-Summary` Excel tab
+  now contains the raw per-second rows from the source file (`op`, `start`, `end`, throughput,
+  `ops_per_sec`, `errors`), sorted by start time, rather than aggregate statistics. The aggregate
+  statistics view is still available in the terminal output.
+
+- **Chart tab column layout** — The Charts tab data columns are now organised as
+  `{op}_time_s`, `{op}_{unit}`, `{op}_{ops_unit}` triplets (one triplet per op type),
+  with TOTAL and zero-throughput ops excluded. Both the throughput and I/O-rate charts
+  share the same per-op elapsed-time column as their X axis.
+
+- **Documentation** — `README.md`, `rust/README.md`, and `rust/MANUAL.md` updated to
+  clearly describe the three Excel input modes (trace only, summary only, both together)
+  and the correct output tab contents.
+
+### Fixed
+
+- Rust: removed redundant `as u32` cast flagged by `cargo clippy`
+- Rust: applied `cargo fmt` formatting to three locations in `main.rs`
+- Python: applied `ruff format` reformat pass
+
+---
+
 ## [0.2.0] - 2026-05-15
 
 ### New Features

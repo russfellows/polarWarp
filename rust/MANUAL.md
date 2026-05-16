@@ -119,31 +119,44 @@ PolarWarp-rs outputs a table with the following columns:
 
 ## Excel Export
 
-Use `--excel` to export results to an Excel `.xlsx` workbook:
+Use `--excel` to export results to an Excel `.xlsx` workbook. There are three usage modes depending on which file(s) you pass:
 
 ```bash
-# Export to auto-named file (derived from first input filename)
-polarwarp-rs --excel oplog.tsv.zst
+# Mode 1 — Trace file only
+# Produces: Results + Detail tabs (latency percentiles, throughput, op counts)
+polarwarp-rs --excel=report.xlsx run.trace.tsv.zst
 
-# Export to a specific file
-polarwarp-rs --excel=report.xlsx agent-1.tsv.zst agent-2.tsv.zst
+# Mode 2 — Summary file only
+# Produces: Summary tab (raw per-second rows) + Charts tab (XY scatter plots)
+polarwarp-rs --excel=report.xlsx run.summary.tsv.zst
+
+# Mode 3 — Both files together (recommended for a complete picture)
+# Produces: all four tabs in one workbook
+polarwarp-rs --excel=report.xlsx run.trace.tsv.zst run.summary.tsv.zst
+
+# The trace and summary files from the same warp run share a base filename:
+#   warp-mixed-2026-05-15[153937]-Gn1h.trace.tsv.zst
+#   warp-mixed-2026-05-15[153937]-Gn1h.summary.tsv.zst
+
+# Export to auto-named file (derived from first input filename)
+polarwarp-rs --excel run.trace.tsv.zst
 
 # Combine with other options
-polarwarp-rs --skip 90s --per-endpoint --excel=report.xlsx oplog.tsv.zst
+polarwarp-rs --skip 90s --per-endpoint --excel=report.xlsx run.trace.tsv.zst run.summary.tsv.zst
 ```
 
 ### Workbook Structure
 
-Each workbook contains the following sheets:
+Sheets produced depend on the input file type(s):
 
-| Sheet | Contents |
-|-------|----------|
-| `<filename>-Results` | Full size-bucketed statistics table for one trace file |
-| `<filename>-Detail` | Per-endpoint (or per-client) breakdown for one trace file |
-| `Consolidated-Results` | Merged results across all trace files (only present when `>1` file is given) |
-| `Consolidated-Detail` | Merged per-endpoint breakdown (only when `>1` trace file is given) |
-| `<filename>-Summary` | Aggregate throughput statistics per op type for one summary file |
-| `<filename>-Charts` | Per-second time-series data with ops/sec and MiB/s line charts for one summary file |
+| Sheet | Source | Contents |
+|-------|--------|----------|
+| `<filename>-Results` | Trace | Full size-bucketed statistics table (latency, throughput, op counts) |
+| `<filename>-Detail` | Trace | Per-endpoint or per-client breakdown |
+| `Consolidated-Results` | Trace (multiple) | Merged results across all trace files |
+| `Consolidated-Detail` | Trace (multiple) | Merged per-endpoint breakdown |
+| `<filename>-Summary` | Summary | Raw per-second rows: op, start, end, GBps, ops/sec, errors |
+| `<filename>-Charts` | Summary | Two XY scatter charts: Throughput (GB/s) and I/O Rate (ops/sec) over elapsed time, one series per op type (GET, PUT, etc.; TOTAL excluded) |
 
 Detail tabs contain three sections:
 - **Overall** — aggregate per-endpoint stats (all op types combined)

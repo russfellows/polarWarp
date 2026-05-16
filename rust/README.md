@@ -1,6 +1,6 @@
 # PolarWarp - Rust Implementation
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.2.1-blue.svg)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](../LICENSE)
 [![Tests](https://img.shields.io/badge/tests-28%20passing-brightgreen.svg)](src/main.rs)
@@ -60,11 +60,14 @@ polarwarp-rs --skip 2m oplog.trace.tsv.zst
 # Compare performance across multiple clients
 polarwarp-rs --per-client multi_client_oplog.trace.tsv.zst
 
-# Export results to Excel
-polarwarp-rs --excel report.xlsx oplog.trace.tsv.zst
+# Trace file only → Results + Detail tabs (latency percentiles, throughput, op counts)
+polarwarp-rs --excel=report.xlsx run.trace.tsv.zst
 
-# Summary files produce a Stats tab + a Charts tab (ops/sec and MiB/s over time)
-polarwarp-rs --excel run.summary.tsv.zst
+# Summary file only → Summary tab (raw per-second rows) + Charts tab (XY scatter)
+polarwarp-rs --excel=report.xlsx run.summary.tsv.zst
+
+# Both files together → all four tabs in one workbook (recommended)
+polarwarp-rs --excel=report.xlsx run.trace.tsv.zst run.summary.tsv.zst
 
 # Per-endpoint breakdown
 polarwarp-rs --per-endpoint oplog.trace.tsv.zst

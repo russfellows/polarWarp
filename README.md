@@ -23,6 +23,52 @@ High-performance tool for analyzing storage I/O operation logs (oplog files from
 - **Multi-file consolidation**: Combine results from multiple agents, with automatic overlap detection — sequential runs are flagged and skipped, partial overlaps are warned and trimmed to the intersection window
 - **Time skip**: Exclude warmup periods with `--skip` option
 
+---
+
+## Analyzing warp-replay Results — Quick Start
+
+Every [warp-replay](https://github.com/russfellows/warp-replay) run produces two output files:
+
+| File | Contents |
+|------|----------|
+| `<run>.summary.tsv` | Aggregated per-second rows — one row per second per op type. Always written, no extra flags needed. Small (~30–100 KB). |
+| `<run>.trace.tsv.zst` | Every individual HTTP request. Written only when `warp` is run with `--full`. Can be large (GBs). |
+
+Pass **both files together** to get a complete Excel workbook with four tabs:
+
+```bash
+# Rust (recommended — 2× faster)
+./rust/target/release/polarwarp-rs --excel \
+    warp-mixed-2026-05-16[162123]-EoSN.summary.tsv \
+    warp-mixed-2026-05-16[162123]-EoSN.trace.tsv.zst
+
+# Python
+cd python && uv run ./polarwarp.py --excel \
+    ../warp-mixed-2026-05-16[162123]-EoSN.summary.tsv \
+    ../warp-mixed-2026-05-16[162123]-EoSN.trace.tsv.zst
+```
+
+This produces `warp-mixed-2026-05-16[162123]-EoSN.xlsx` with:
+
+| Tab | Contents |
+|-----|----------|
+| **`{name}-Results`** | Size-bucketed latency and throughput table (from trace file) |
+| **`{name}-Detail`** | Per-op-type detail rows (from trace file) |
+| **`{name}-Summary`** | Raw per-second rows: op, timestamp, GB/s, ops/sec, errors (from summary file) |
+| **`{name}-Charts`** | Two XY scatter charts — **Throughput (GB/s)** and **I/O Rate (ops/sec)** vs elapsed time, one series per op type (GET, PUT, …). Charts are positioned to the right of the data so they are visible immediately on open. |
+
+If you only have one file, pass just that one — polarWarp auto-detects the file type and produces the applicable tabs.
+
+```bash
+# Summary only → Summary + Charts tabs
+./rust/target/release/polarwarp-rs --excel warp-mixed-....summary.tsv
+
+# Trace only → Results + Detail tabs
+./rust/target/release/polarwarp-rs --excel warp-mixed-....trace.tsv.zst
+```
+
+---
+
 ## Implementations
 
 PolarWarp is available in two implementations with identical functionality and output format:
